@@ -1,0 +1,10 @@
+{
+  "synced_at": "2026-06-28 18:06:26",
+  "success": true,
+  "order_count": 3,
+  "error": null,
+  "source": "multi_source_excel",
+  "sources_used": [
+    "EasyBoss"
+  ]
+}
