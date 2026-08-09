@@ -95,6 +95,8 @@ with st.sidebar:
             _expire_ts = _fetch_time + _expire_in
             _expire_dt = datetime.utcfromtimestamp(_expire_ts).strftime("%Y-%m-%d %H:%M UTC")
             st.caption(f"Token expires: {_expire_dt}")
+            if _shopee_auth.is_token_expired(_tokens):
+                st.warning("⚠️ Token sudah expired atau hampir expired. Klik Reconnect.")
 
         with st.expander("Token Details"):
             st.json({

@@ -43,12 +43,17 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 SHOPEE_HOST = "https://partner.shopeemobile.com"
-TOKEN_PATH  = "/api/v2/auth/token/get"
-AUTH_PATH   = "/api/v2/shop/auth_partner"
-TOKENS_FILE = "tokens.json"
+TOKEN_PATH   = "/api/v2/auth/token/get"
+REFRESH_PATH = "/api/v2/auth/access_token/get"
+AUTH_PATH    = "/api/v2/shop/auth_partner"
+TOKENS_FILE  = "tokens.json"
 
 # Timeout for all outbound requests to Shopee API (seconds).
 REQUEST_TIMEOUT_SECONDS = 15
+
+# Refresh the access token this many seconds before it actually expires,
+# to avoid race conditions and clock skew.
+TOKEN_EXPIRY_BUFFER_SECONDS = 300  # 5 minutes
 
 
 # ---------------------------------------------------------------------------
@@ -370,13 +375,6 @@ def save_tokens(data: Dict, shop_id: int) -> Dict:
         TOKENS_FILE, expire_in, fetch_time,
     )
 
-    # TODO: Implement refresh token flow before access_token expires.
-    # - access_token expires in `expire_in` seconds from `fetch_time`.
-    # - Use refresh_token to call /api/v2/auth/access_token/get before expiry.
-    # - Refresh token itself expires in 30 days (Shopee default).
-    # - Store renewed tokens back to persistent storage (replace tokens.json
-    #   with a proper database or Streamlit Secrets before production use).
-
     return tokens
 
 
@@ -397,6 +395,237 @@ def load_tokens() -> Optional[Dict]:
     except (json.JSONDecodeError, OSError) as e:
         logger.warning("Failed to load tokens.json: %s", e)
         return None
+
+
+# ---------------------------------------------------------------------------
+# Token expiry check
+# ---------------------------------------------------------------------------
+
+def is_token_expired(tokens: Dict) -> bool:
+    """Return True if the access token is expired or within the expiry buffer.
+
+    Uses fetch_time + expire_in to compute the absolute expiry timestamp,
+    then compares it against now + TOKEN_EXPIRY_BUFFER_SECONDS so the
+    token is refreshed slightly before it actually expires.
+
+    Args:
+        tokens: token dict as returned by load_tokens() or save_tokens().
+
+    Returns:
+        True  — token is expired or will expire within TOKEN_EXPIRY_BUFFER_SECONDS.
+        False — token is still valid with sufficient margin.
+    """
+    fetch_time = tokens.get("fetch_time", 0)
+    expire_in  = tokens.get("expire_in", 0)
+
+    if not fetch_time or not expire_in:
+        # Missing expiry info — treat as expired to force a refresh.
+        logger.warning("Token expiry info missing; treating token as expired.")
+        return True
+
+    expiry_ts = fetch_time + expire_in
+    now       = int(time.time())
+    remaining = expiry_ts - now
+
+    logger.debug(
+        "Token expiry check: fetch_time=%s expire_in=%s expiry_ts=%s now=%s remaining=%ss",
+        fetch_time, expire_in, expiry_ts, now, remaining,
+    )
+
+    return remaining <= TOKEN_EXPIRY_BUFFER_SECONDS
+
+
+# ---------------------------------------------------------------------------
+# Token refresh
+# ---------------------------------------------------------------------------
+
+def refresh_access_token(tokens: Dict) -> Dict:
+    """Refresh an expired (or near-expired) Shopee access token.
+
+    Calls POST /api/v2/auth/access_token/get with the stored refresh_token,
+    shop_id, and partner_id, using the Shopee v2 public signature variant
+    (same base string as the initial token exchange):
+        {partner_id}{api_path}{timestamp}
+
+    Args:
+        tokens: current token dict as returned by load_tokens(). Must contain
+                refresh_token, shop_id, and partner_id.
+
+    Returns:
+        Raw JSON response dict from Shopee (unfiltered). Pass this to
+        save_tokens() to persist the new token.
+
+    Raises:
+        ValueError:            missing required fields in tokens dict, or
+                               invalid/missing credentials in os.environ.
+        requests.Timeout:      network request timed out.
+        requests.HTTPError:    HTTP 4xx or 5xx from Shopee.
+        json.JSONDecodeError:  response body is not valid JSON.
+        RuntimeError:          Shopee returned HTTP 200 with an error in body.
+    """
+    refresh_token = tokens.get("refresh_token", "")
+    shop_id       = tokens.get("shop_id", 0)
+    # partner_id stored in tokens is used as a sanity source; credentials
+    # are still re-read from os.environ to pick up any rotation.
+    stored_partner_id = tokens.get("partner_id", 0)
+
+    if not refresh_token:
+        raise ValueError(
+            "Token refresh failed: 'refresh_token' is missing from saved tokens. "
+            "Re-authorize via Connect Shopee."
+        )
+    if not shop_id:
+        raise ValueError(
+            "Token refresh failed: 'shop_id' is missing from saved tokens. "
+            "Re-authorize via Connect Shopee."
+        )
+
+    partner_id, partner_key = get_credentials()
+
+    if stored_partner_id and int(stored_partner_id) != partner_id:
+        logger.warning(
+            "partner_id mismatch: tokens.json has %s but env has %s. "
+            "Using env value.", stored_partner_id, partner_id,
+        )
+
+    timestamp = int(time.time())
+    sign = generate_signature(partner_id, REFRESH_PATH, timestamp, partner_key)
+
+    url = (
+        f"{SHOPEE_HOST}{REFRESH_PATH}"
+        f"?partner_id={partner_id}&timestamp={timestamp}&sign={sign}"
+    )
+
+    body = {
+        "refresh_token": refresh_token,
+        "shop_id":       int(shop_id),
+        "partner_id":    partner_id,
+    }
+
+    logger.info("Refreshing access token for shop_id=%s ...", shop_id)
+    logger.info("Endpoint: POST %s%s", SHOPEE_HOST, REFRESH_PATH)
+    # refresh_token is NOT logged — treat it as a secret.
+
+    try:
+        response = requests.post(
+            url,
+            json=body,
+            headers={"Content-Type": "application/json"},
+            timeout=REQUEST_TIMEOUT_SECONDS,
+        )
+    except requests.Timeout:
+        raise requests.Timeout(
+            f"Network timeout: Shopee API did not respond within "
+            f"{REQUEST_TIMEOUT_SECONDS} seconds during token refresh."
+        )
+    except requests.ConnectionError as e:
+        raise requests.ConnectionError(
+            f"Network error during token refresh: {e}"
+        )
+
+    logger.info("Shopee refresh response status: %s", response.status_code)
+
+    if response.status_code == 401:
+        raise requests.HTTPError(
+            "HTTP 401 during token refresh: signature or partner_id is invalid."
+        )
+    if response.status_code == 403:
+        raise requests.HTTPError(
+            "HTTP 403 during token refresh: refresh_token may be expired or revoked. "
+            "Re-authorize via Connect Shopee."
+        )
+    if response.status_code == 500:
+        raise requests.HTTPError(
+            "HTTP 500 from Shopee during token refresh. Try again later."
+        )
+
+    try:
+        response.raise_for_status()
+    except requests.HTTPError as e:
+        raise requests.HTTPError(
+            f"HTTP error during token refresh (status {response.status_code}): {e}"
+        )
+
+    try:
+        data = response.json()
+    except (json.JSONDecodeError, ValueError):
+        raise json.JSONDecodeError(
+            f"JSON parse failure during token refresh. "
+            f"Raw response (first 200 chars): {response.text[:200]!r}",
+            doc=response.text,
+            pos=0,
+        )
+
+    error_code = data.get("error", "")
+    if error_code:
+        error_msg = data.get("message", "no message")
+        known_errors = {
+            "error_auth":         "refresh_token is invalid or expired. Re-authorize via Connect Shopee.",
+            "error_param":        "Invalid request parameters during refresh.",
+            "error_permission":   "Permission denied during token refresh.",
+            "error_server":       "Shopee server error during refresh. Try again later.",
+            "error_sign_invalid": "Invalid signature during refresh. Check SHOPEE_PARTNER_KEY.",
+        }
+        friendly = known_errors.get(error_code, "")
+        detail = f" ({friendly})" if friendly else ""
+        raise RuntimeError(
+            f"Shopee token refresh error [{error_code}]: {error_msg}{detail}"
+        )
+
+    logger.info("Token refresh successful for shop_id=%s.", shop_id)
+    return data
+
+
+# ---------------------------------------------------------------------------
+# High-level token accessor
+# ---------------------------------------------------------------------------
+
+def get_valid_access_token() -> str:
+    """Return a valid Shopee access token, refreshing automatically if needed.
+
+    Load-check-refresh cycle:
+    1. Load tokens from tokens.json.
+    2. If missing → raise RuntimeError (re-auth required).
+    3. If expired or within TOKEN_EXPIRY_BUFFER_SECONDS of expiry → refresh.
+    4. Save refreshed tokens back to tokens.json.
+    5. Return the access_token string.
+
+    Returns:
+        access_token string, guaranteed to be valid for at least
+        TOKEN_EXPIRY_BUFFER_SECONDS more seconds (barring Shopee-side
+        revocation).
+
+    Raises:
+        RuntimeError: tokens.json not found, or refresh failed and the
+                      caller should prompt re-authorization.
+        ValueError:   credentials missing from os.environ.
+        requests.*:   network errors during refresh (propagated from
+                      refresh_access_token()).
+    """
+    tokens = load_tokens()
+
+    if tokens is None:
+        raise RuntimeError(
+            "No saved tokens found. Authorize Shopee via Connect Shopee first."
+        )
+
+    if is_token_expired(tokens):
+        logger.info("Access token expired or near expiry — refreshing...")
+        data = refresh_access_token(tokens)
+        shop_id = tokens.get("shop_id", 0)
+        tokens  = save_tokens(data, shop_id)
+        logger.info("Token refreshed and saved.")
+    else:
+        logger.debug("Access token is still valid — no refresh needed.")
+
+    access_token = tokens.get("access_token", "")
+    if not access_token:
+        raise RuntimeError(
+            "access_token is empty after load/refresh cycle. "
+            "Re-authorize via Connect Shopee."
+        )
+
+    return access_token
 
 
 # ---------------------------------------------------------------------------
