@@ -10,7 +10,130 @@ st.title("📦 Shopee Packing Checker")
 DATA_FILE = "data/orders_master.csv"
 PACKED_FILE = "packed.csv"
 
-# Status values used by Shopee Indonesia exports that mean the order is cancelled
+# ---- Shopee OAuth callback handler ----
+# Runs once per page load. If Shopee redirected back here with ?code=&shop_id=,
+# exchange the code for tokens immediately before rendering the packing UI.
+# If no code is present, this block is skipped entirely — packing flow unaffected.
+import shopee_auth as _shopee_auth
+
+# ---- Inject Streamlit secrets into os.environ ----
+# shopee_auth.py reads credentials from os.environ (keeping it Streamlit-free
+# and independently testable). Here in app.py we bridge st.secrets → os.environ
+# so that both local development (secrets.toml) and Streamlit Cloud (Secrets UI)
+# work without a .env file or any other credential mechanism.
+# This runs once at startup, before any shopee_auth function is called.
+def _inject_shopee_secrets():
+    try:
+        partner_id  = str(st.secrets["SHOPEE_PARTNER_ID"]).strip()
+        partner_key = str(st.secrets["SHOPEE_PARTNER_KEY"]).strip()
+        os.environ["SHOPEE_PARTNER_ID"]  = partner_id
+        os.environ["SHOPEE_PARTNER_KEY"] = partner_key
+    except KeyError as e:
+        # Secrets not configured yet — sidebar will show an error when user
+        # tries to connect. Packing system continues working normally.
+        pass
+
+_inject_shopee_secrets()
+
+def _handle_shopee_oauth():
+    params = st.query_params
+    code = params.get("code", "")
+    shop_id_str = params.get("shop_id", "")
+
+    if not code or not shop_id_str:
+        return  # normal page load, not an OAuth callback
+
+    st.info("🔑 Shopee OAuth callback diterima. Menukar code untuk access token...")
+
+    try:
+        shop_id = int(shop_id_str)
+        saved = _shopee_auth.handle_oauth_callback(code, shop_id)
+
+        st.success("✅ Token Shopee berhasil didapat dan disimpan ke `tokens.json`!")
+        st.json({
+            "access_token":  _shopee_auth.mask_token(saved["access_token"]),
+            "refresh_token": _shopee_auth.mask_token(saved["refresh_token"]),
+            "expire_in":     saved["expire_in"],
+            "fetch_time":    saved["fetch_time"],
+            "shop_id":       saved["shop_id"],
+        })
+
+        # Clear the OAuth params from the URL so a page refresh doesn't
+        # attempt to re-use the same code (codes are one-time use),
+        # then rerun so the clean URL takes effect immediately.
+        st.query_params.clear()
+        st.rerun()
+
+    except ValueError as e:
+        # Credential/config error — show message but let packing UI continue.
+        st.error(f"❌ Konfigurasi error: {e}")
+    except RuntimeError as e:
+        # Shopee API returned an application-level error — let packing UI continue.
+        st.error(f"❌ Shopee API error: {e}")
+    except Exception as e:
+        # Unexpected error — show detail but let packing UI continue.
+        st.error(f"❌ Unexpected error saat OAuth: {e}")
+
+_handle_shopee_oauth()
+
+# ---- Shopee Integration sidebar ----
+# Entirely in the sidebar so it never interferes with the packing UI layout.
+# The packing checker works normally regardless of Shopee connection status.
+with st.sidebar:
+    st.header("🟠 Shopee Integration")
+
+    _tokens = _shopee_auth.load_tokens()
+
+    if _tokens:
+        st.success("✅ Shopee Terhubung")
+        st.caption(f"Shop ID: {_tokens.get('shop_id', '-')}")
+
+        # Show token expiry info if available
+        _fetch_time = _tokens.get("fetch_time", 0)
+        _expire_in  = _tokens.get("expire_in", 0)
+        if _fetch_time and _expire_in:
+            _expire_ts = _fetch_time + _expire_in
+            _expire_dt = datetime.utcfromtimestamp(_expire_ts).strftime("%Y-%m-%d %H:%M UTC")
+            st.caption(f"Token expires: {_expire_dt}")
+
+        with st.expander("Token Details"):
+            st.json({
+                "access_token":  _shopee_auth.mask_token(_tokens.get("access_token", "")),
+                "refresh_token": _shopee_auth.mask_token(_tokens.get("refresh_token", "")),
+                "expire_in":     _tokens.get("expire_in"),
+                "fetch_time":    _tokens.get("fetch_time"),
+                "shop_id":       _tokens.get("shop_id"),
+            })
+
+        if st.button("🔄 Reconnect Shopee", key="btn_reconnect_shopee"):
+            try:
+                # Redirect URL must match exactly what is registered in Shopee Open Platform.
+                _redirect_url = "https://onbie-packing.streamlit.app"
+                _auth_url = _shopee_auth.generate_auth_url(_redirect_url)
+                st.link_button("🔄 Klik di sini untuk reconnect ke Shopee", _auth_url)
+            except ValueError as e:
+                st.error(f"❌ {e}")
+
+    else:
+        st.warning("Belum terhubung ke Shopee")
+
+        if st.button("🟠 Connect Shopee", key="btn_connect_shopee"):
+            try:
+                # Redirect URL must match exactly what is registered in Shopee Open Platform.
+                _redirect_url = "https://onbie-packing.streamlit.app"
+                _auth_url = _shopee_auth.generate_auth_url(_redirect_url)
+                st.link_button("🟠 Klik di sini untuk connect ke Shopee", _auth_url)
+            except ValueError as e:
+                st.error(f"❌ {e}")
+
+        st.caption(
+            "Klik tombol di atas untuk mengizinkan Onbie Packing System "
+            "mengakses data order Shopee kamu."
+        )
+
+    st.divider()
+
+
 CANCELLED_KEYWORDS = ["batal", "cancel"]
 # Only orders whose status CONTAINS this phrase may be packed
 PACKABLE_KEYWORD = "perlu dikirim"
@@ -88,73 +211,15 @@ def get_packed_at(order_number):
     return None
 
 
-SNAPSHOT_FILE = "packed_snapshots.csv"
-SNAPSHOT_RETENTION_DAYS = 7
-
-SNAPSHOT_COLUMNS = [
-    "order_number", "packed_at",
-    "No. Pesanan", "Username (Pembeli)", "Nama Penerima", "Platform", "Toko",
-    "Provinsi", "Kota/Kabupaten", "Antar ke counter/ pick-up",
-    "Nama Variasi", "Jumlah",
-]
-
-
-def load_snapshot_df():
-    if os.path.exists(SNAPSHOT_FILE):
-        return pd.read_csv(SNAPSHOT_FILE)
-    return pd.DataFrame(columns=SNAPSHOT_COLUMNS)
-
-
-def save_packed_snapshot(order_number, order_rows, packed_at_str):
-    """Store the product details for this order at the moment it's packed,
-    so History can reprint it later even if orders_master.csv changes.
-    Appends only — never modifies packed.csv. Auto-prunes snapshots older
-    than SNAPSHOT_RETENTION_DAYS on every write to keep the file small."""
-    df = load_snapshot_df()
-
-    # Skip if this order already has a snapshot (avoid duplicates if packed twice)
-    if not df.empty and order_number in set(df["order_number"].astype(str)):
-        new_df = df
-    else:
-        new_rows = []
-        for _, r in order_rows.iterrows():
-            new_rows.append({
-                "order_number": order_number,
-                "packed_at": packed_at_str,
-                "No. Pesanan": r.get("No. Pesanan", "-"),
-                "Username (Pembeli)": r.get("Username (Pembeli)", "-"),
-                "Nama Penerima": r.get("Nama Penerima", "-"),
-                "Platform": r.get("Platform", "-"),
-                "Toko": r.get("Toko", "-"),
-                "Provinsi": r.get("Provinsi", "-"),
-                "Kota/Kabupaten": r.get("Kota/Kabupaten", "-"),
-                "Antar ke counter/ pick-up": r.get("Antar ke counter/ pick-up", "-"),
-                "Nama Variasi": r.get("Nama Variasi", "-"),
-                "Jumlah": r.get("Jumlah", 0),
-            })
-        new_df = pd.concat([df, pd.DataFrame(new_rows)], ignore_index=True)
-
-    # Prune snapshots older than retention window
-    new_df["__packed_at_dt"] = pd.to_datetime(new_df["packed_at"], errors="coerce")
-    cutoff = pd.Timestamp(datetime.now()) - pd.Timedelta(days=SNAPSHOT_RETENTION_DAYS)
-    new_df = new_df[new_df["__packed_at_dt"].isna() | (new_df["__packed_at_dt"] >= cutoff)]
-    new_df = new_df.drop(columns=["__packed_at_dt"])
-
-    new_df.to_csv(SNAPSHOT_FILE, index=False)
-
-
-def save_packed_order(order_number, order_rows=None):
+def save_packed_order(order_number):
     df = load_packed_df()
     order_number = str(order_number).strip()
     if order_number not in set(df["order_number"]):
-        packed_at_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         new_row = pd.DataFrame([{
             "order_number": order_number,
-            "packed_at": packed_at_str,
+            "packed_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         }])
         df = pd.concat([df, new_row], ignore_index=True)
-        if order_rows is not None and not order_rows.empty:
-            save_packed_snapshot(order_number, order_rows, packed_at_str)
     df.to_csv(PACKED_FILE, index=False)
 
 
@@ -189,124 +254,6 @@ def style_dashboard_table(df, wrap_columns=None):
     ])
 
     return styler
-
-
-def build_report_table_rows(report_rows):
-    """Group report_rows by order number (rows assumed already adjacent per
-    order) and render <tr> HTML with rowspan on order-level columns for
-    multi-product orders. Returns the joined <tr>...</tr> HTML string.
-    Used by both the on-screen table and the printable report, and by
-    Packing History reprints, so all three stay visually consistent."""
-    rows_list = list(report_rows.iterrows())
-    row_groups = []
-    for _, r in rows_list:
-        order_no = r.get('No. Pesanan', '-')
-        if row_groups and row_groups[-1][0] == order_no:
-            row_groups[-1][1].append(r)
-        else:
-            row_groups.append((order_no, [r]))
-
-    parts = []
-    for order_no, rows in row_groups:
-        n = len(rows)
-        first = rows[0]
-        rowspan_attr = f' rowspan="{n}"' if n > 1 else ""
-        parts.append(f"""
-        <tr>
-            <td{rowspan_attr}>{first.get('No. Pesanan','-')}</td>
-            <td{rowspan_attr}>{first.get('Username (Pembeli)','-')}</td>
-            <td{rowspan_attr}>{first.get('Nama Penerima','-')}</td>
-            <td{rowspan_attr}>{first.get('Platform','-')}</td>
-            <td{rowspan_attr}>{first.get('Toko','-')}</td>
-            <td{rowspan_attr}>{first.get('Provinsi','-')}</td>
-            <td{rowspan_attr}>{first.get('Kota/Kabupaten','-')}</td>
-            <td{rowspan_attr}>{first.get('Antar ke counter/ pick-up','-')}</td>
-            <td>{first.get('Nama Variasi','-')}</td>
-            <td>{int(first.get('Jumlah',0)) if pd.notna(first.get('Jumlah')) else 0}</td>
-        </tr>
-        """)
-        for r in rows[1:]:
-            parts.append(f"""
-        <tr>
-            <td>{r.get('Nama Variasi','-')}</td>
-            <td>{int(r.get('Jumlah',0)) if pd.notna(r.get('Jumlah')) else 0}</td>
-        </tr>
-        """)
-    return "".join(parts)
-
-
-def render_screen_report_table(report_rows):
-    """Render the rowspan-grouped report as an on-screen HTML table via st.markdown."""
-    table_rows_html = build_report_table_rows(report_rows)
-    table_html = f"""
-    <style>
-        .daily-report-table {{ border-collapse: collapse; width: 100%; font-size: 14px; }}
-        .daily-report-table th {{ background:#f0f0f0; color:#1a1a1a; padding:10px; border:1px solid #444; text-align:center; vertical-align:middle; font-weight:bold; }}
-        .daily-report-table td {{ padding:10px; border:1px solid #444; text-align:center; vertical-align:middle; }}
-    </style>
-    <table class="daily-report-table">
-        <tr>
-            <th>Order Number</th><th>Username</th><th>Recipient</th><th>Platform</th><th>Shop</th><th>Province</th><th>Kabupaten/Kota</th><th>Shipping</th><th>Variant</th><th>Qty</th>
-        </tr>
-        {table_rows_html}
-    </table>
-    """
-    st.markdown(
-        "\n".join(line.strip() for line in table_html.splitlines()),
-        unsafe_allow_html=True,
-    )
-
-
-def build_printable_report_html(date_str, order_count, report_rows, summary_line=None):
-    """Build the printable packing report HTML for a given date.
-    summary_line: optional extra <p> HTML shown above the order-count line
-    (used for today's live dashboard totals; omitted for historical
-    reprints since those totals are 'right now', not 'as of that date')."""
-    table_rows_html = build_report_table_rows(report_rows)
-    summary_html = f'<p class="summary">{summary_line}</p>' if summary_line else ""
-    return f"""
-    <html>
-    <head>
-    <title>Laporan Packing {date_str}</title>
-    <style>
-        body {{ font-family: Arial, sans-serif; padding: 24px; }}
-        h1 {{ font-size: 20px; }}
-        table {{ border-collapse: collapse; width: 100%; margin-top: 12px; font-size: 11px; }}
-        th {{ background:#f0f0f0; padding:6px; border:1px solid #ccc; text-align:center; vertical-align:middle; font-weight:bold; }}
-        td {{ padding:6px; border:1px solid #ccc; text-align:center; vertical-align:middle; }}
-        .summary {{ margin-top: 16px; font-size: 14px; }}
-    </style>
-    </head>
-    <body onload="window.print()">
-        <h1>📅 Laporan Packing Harian — {date_str}</h1>
-        {summary_html}
-        <p class="summary"><b>Di-pack: {order_count} order</b></p>
-        <table>
-            <tr>
-                <th>No. Pesanan</th><th>Username</th><th>Nama Penerima</th><th>Platform</th><th>Toko</th><th>Provinsi</th><th>Kabupaten/Kota</th><th>Nama Logistik</th><th>Variasi</th><th>Qty</th>
-            </tr>
-            {table_rows_html}
-        </table>
-        <p style="margin-top:24px;font-size:12px;color:#888;">Dicetak: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</p>
-    </body>
-    </html>
-    """
-
-
-def print_report_button(button_label, button_key, daily_report_html):
-    """Render a print button that opens the given report HTML in a new window."""
-    if st.button(button_label, key=button_key):
-        escaped_report = daily_report_html.replace("`", "\\`")
-        components.html(
-            f"""
-            <script>
-            const w = window.open('', '_blank');
-            w.document.write(`{escaped_report}`);
-            w.document.close();
-            </script>
-            """,
-            height=0,
-        )
 
 
 def focus_search_box():
@@ -392,7 +339,7 @@ else:
                     packable = is_packable_status(status)
                     already_packed = order_number in packed_orders
                     if packable and not already_packed:
-                        save_packed_order(order_number, results)
+                        save_packed_order(order_number)
                         st.session_state.just_packed_order = order_number
 
     # ---- Order not found banner ----
@@ -474,7 +421,7 @@ else:
                     st.button("✅ Sudah Di-Pack", disabled=True, key="btn_already_packed")
                 else:
                     if st.button("📌 Mark as Packed", key="btn_manual_pack", use_container_width=True):
-                        save_packed_order(order_number, results)
+                        save_packed_order(order_number)
                         st.session_state.just_packed_order = order_number
                         st.rerun()
 
@@ -633,20 +580,94 @@ else:
 
         st.write(f"**{len(today_order_numbers)} order** sudah di-pack hari ini ({today_str})")
 
-        # On-screen table: same rowspan grouping as the printable report,
-        # so multi-product orders look identical on-screen and on print.
-        render_screen_report_table(report_rows)
+        report_df = report_rows[
+            ["No. Pesanan", "Username (Pembeli)", "Nama Penerima", "Platform", "Toko", "Provinsi", "Kota/Kabupaten", "Antar ke counter/ pick-up", "Nama Variasi", "Jumlah"]
+        ].copy()
 
-        today_summary_line = (
-            f"Total Order: {total_orders} &nbsp;|&nbsp; "
-            f"Sudah Di-Pack: {total_packed} &nbsp;|&nbsp; "
-            f"Perlu Dikirim: {packable_orders} &nbsp;|&nbsp; "
-            f"Batal: {total_cancelled}"
+        styled_report_df = style_dashboard_table(
+            report_df.rename(columns={
+                "No. Pesanan": "Order Number",
+                "Username (Pembeli)": "Username",
+                "Nama Penerima": "Recipient",
+                "Platform": "Platform",
+                "Toko": "Shop",
+                "Provinsi": "Province",
+                "Kota/Kabupaten": "Kabupaten/Kota",
+                "Antar ke counter/ pick-up": "Shipping",
+                "Nama Variasi": "Variant",
+                "Jumlah": "Qty"
+            })
         )
-        daily_report_html = build_printable_report_html(
-            today_str, len(today_order_numbers), report_rows, summary_line=today_summary_line
+        st.dataframe(
+            styled_report_df,
+            use_container_width=True,
+            hide_index=True,
         )
-        print_report_button("🖨️ Print Laporan Hari Ini", "btn_print_today", daily_report_html)
+
+        # Build printable daily report HTML
+        report_table_rows = "".join(
+            f"""
+            <tr>
+                <td>{r.get('No. Pesanan','-')}</td>
+                <td>{r.get('Username (Pembeli)','-')}</td>
+                <td>{r.get('Nama Penerima','-')}</td>
+                <td>{r.get('Platform','-')}</td>
+                <td>{r.get('Toko','-')}</td>
+                <td>{r.get('Provinsi','-')}</td>
+                <td>{r.get('Kota/Kabupaten','-')}</td>
+                <td>{r.get('Antar ke counter/ pick-up','-')}</td>
+                <td>{r.get('Nama Variasi','-')}</td>
+                <td>{int(r.get('Jumlah',0)) if pd.notna(r.get('Jumlah')) else 0}</td>
+            </tr>
+            """
+            for _, r in report_rows.iterrows()
+        )
+
+        daily_report_html = f"""
+        <html>
+        <head>
+        <title>Laporan Packing {today_str}</title>
+        <style>
+            body {{ font-family: Arial, sans-serif; padding: 24px; }}
+            h1 {{ font-size: 20px; }}
+            table {{ border-collapse: collapse; width: 100%; margin-top: 12px; font-size: 11px; }}
+            th {{ background:#f0f0f0; padding:6px; border:1px solid #ccc; text-align:center; vertical-align:middle; font-weight:bold; }}
+            td {{ padding:6px; border:1px solid #ccc; text-align:center; vertical-align:middle; }}
+            .summary {{ margin-top: 16px; font-size: 14px; }}
+        </style>
+        </head>
+        <body onload="window.print()">
+            <h1>📅 Laporan Packing Harian — {today_str}</h1>
+            <p class="summary">
+                Total Order: {total_orders} &nbsp;|&nbsp;
+                Sudah Di-Pack: {total_packed} &nbsp;|&nbsp;
+                Perlu Dikirim: {packable_orders} &nbsp;|&nbsp;
+                Batal: {total_cancelled}
+            </p>
+            <p class="summary"><b>Di-pack hari ini: {len(today_order_numbers)} order</b></p>
+            <table>
+                <tr>
+                    <th>No. Pesanan</th><th>Username</th><th>Nama Penerima</th><th>Platform</th><th>Toko</th><th>Provinsi</th><th>Kabupaten/Kota</th><th>Nama Logistik</th><th>Variasi</th><th>Qty</th>
+                </tr>
+                {report_table_rows}
+            </table>
+            <p style="margin-top:24px;font-size:12px;color:#888;">Dicetak: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</p>
+        </body>
+        </html>
+        """
+
+        if st.button("🖨️ Print Laporan Hari Ini"):
+            escaped_report = daily_report_html.replace("`", "\\`")
+            components.html(
+                f"""
+                <script>
+                const w = window.open('', '_blank');
+                w.document.write(`{escaped_report}`);
+                w.document.close();
+                </script>
+                """,
+                height=0,
+            )
 
     # ---- Packing History ----
     st.divider()
@@ -678,16 +699,11 @@ else:
         m2.metric("Packed Today", today_packed)
         m3.metric("Packed Last 7 Days", last_7_days)
 
-        # Daily breakdown — counts unique orders packed per day (not product
-        # rows), consistent with how "Laporan Packing Hari Ini" counts orders.
+        # Daily breakdown
         st.subheader("Daily Breakdown")
 
-        packed_df_valid["__date"] = packed_df_valid["packed_at"].dt.date
-        daily_counts = (
-            packed_df_valid.drop_duplicates(subset=["order_number", "__date"])
-            .groupby("__date").size().reset_index()
-        )
-        daily_counts.columns = ["Date", "Total Orders"]
+        daily_counts = packed_df_valid.groupby(packed_df_valid["packed_at"].dt.date).size().reset_index()
+        daily_counts.columns = ["Date", "Packed Count"]
         daily_counts = daily_counts.sort_values("Date", ascending=False)
 
         # Display table
@@ -701,64 +717,4 @@ else:
         # Line chart (sorted by date ascending for better visualization)
         chart_data = daily_counts.sort_values("Date").copy()
         chart_data["Date"] = chart_data["Date"].astype(str)
-        st.line_chart(chart_data.set_index("Date")["Total Orders"], use_container_width=True)
-
-        # ---- View / reprint a previous packing session ----
-        st.subheader("Lihat / Print Sesi Sebelumnya")
-
-        available_dates = [str(d) for d in daily_counts["Date"]]
-        selected_date_str = st.selectbox(
-            "Pilih tanggal packing", available_dates, key="history_session_date"
-        )
-
-        if selected_date_str:
-            session_packed_df = packed_df_valid[packed_df_valid["__date"].astype(str) == selected_date_str]
-            session_order_numbers_ordered = list(session_packed_df["order_number"])  # preserve pack order
-
-            snapshot_df = load_snapshot_df()
-            snapshot_orders_here = set(
-                snapshot_df["order_number"].astype(str)
-            ) if not snapshot_df.empty else set()
-
-            session_report_parts = []
-            missing_from_snapshot = []
-            for order_no in session_order_numbers_ordered:
-                if order_no in snapshot_orders_here:
-                    rows = snapshot_df[snapshot_df["order_number"].astype(str) == order_no]
-                    session_report_parts.append(rows)
-                else:
-                    rows = orders_df[orders_df["No. Pesanan"].astype(str).str.strip() == order_no]
-                    if rows.empty:
-                        missing_from_snapshot.append(order_no)
-                    else:
-                        session_report_parts.append(rows)
-
-            session_report_rows = (
-                pd.concat(session_report_parts, ignore_index=True)
-                if session_report_parts else pd.DataFrame()
-            )
-
-            st.write(f"**{len(session_order_numbers_ordered)} order** di-pack pada {selected_date_str}")
-
-            if missing_from_snapshot:
-                st.caption(
-                    f"⚠️ {len(missing_from_snapshot)} order tidak ditemukan (tidak ada snapshot "
-                    f"dan sudah tidak ada di data/orders_master.csv): {', '.join(missing_from_snapshot)}"
-                )
-
-            if session_report_rows.empty:
-                st.warning(
-                    "Tidak ada detail produk yang tersisa untuk sesi ini "
-                    "(snapshot sudah lewat masa simpan 7 hari, dan order sudah tidak ada di export terbaru)."
-                )
-            else:
-                render_screen_report_table(session_report_rows)
-
-                session_report_html = build_printable_report_html(
-                    selected_date_str, len(session_order_numbers_ordered), session_report_rows
-                )
-                print_report_button(
-                    "🖨️ Print Laporan Sesi Ini",
-                    f"btn_print_session_{selected_date_str}",
-                    session_report_html,
-                )
+        st.line_chart(chart_data.set_index("Date")["Packed Count"], use_container_width=True)
