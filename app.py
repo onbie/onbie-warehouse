@@ -162,7 +162,6 @@ with st.sidebar:
 
 
         # TEMPORARY DIAGNOSTIC — get_order_detail raw GET
-        # Bypasses shopee_api._shopee_get() to diagnose HTTP 404.
         # Sends request directly with requests.get() to inspect raw response.
         # Remove after diagnosis is complete.
         if st.button("🧪 Diagnostic: get_order_detail raw GET", key="btn_diag_order_detail"):
@@ -175,8 +174,10 @@ with st.sidebar:
             _time_to   = int(_time.time())
             _time_from = _time_to - 86400
 
+            # Step 1: get one order_sn — separate try block so its
+            # exceptions cannot swallow the HTTP diagnostic output below.
+            _test_sn = None
             try:
-                # Step 1: get one order_sn to test with
                 _list_result = _shopee_api.get_order_list(
                     time_from=_time_from,
                     time_to=_time_to,
@@ -184,14 +185,17 @@ with st.sidebar:
                     page_size=1,
                 )
                 _list_orders = _list_result.get("order_list", [])
-
-                if not _list_orders:
-                    st.info("Tidak ada order dalam 24 jam terakhir untuk di-test.")
-                else:
+                if _list_orders:
                     _test_sn = _list_orders[0].get("order_sn", "")
-                    st.write(f"Diagnostic order_sn: `{_test_sn}`")
+                else:
+                    st.info("Tidak ada order dalam 24 jam terakhir.")
+            except Exception as _e:
+                st.error(f"❌ get_order_list error: {_e}")
 
-                    # Step 2: build authenticated request manually
+            # Step 2: raw diagnostic GET — only runs if we have an order_sn.
+            if _test_sn:
+                st.write(f"Diagnostic order_sn: `{_test_sn}`")
+                try:
                     _access_token = _shopee_auth_diag.get_valid_access_token()
                     _tokens_diag  = _shopee_auth_diag.load_tokens()
                     _shop_id      = int(_tokens_diag.get("shop_id", 0))
@@ -207,35 +211,37 @@ with st.sidebar:
                         _partner_key,
                     )
 
-                    # order_sn_list sent as JSON array string per Shopee v2 spec
+                    # order_sn_list sent as JSON array string per Shopee v2 spec.
                     _params = {
-                        "partner_id":             _partner_id,
-                        "timestamp":              _timestamp,
-                        "sign":                   _sign,
-                        "access_token":           _access_token,
-                        "shop_id":                _shop_id,
-                        "order_sn_list":          _json.dumps([_test_sn]),
+                        "partner_id":               _partner_id,
+                        "timestamp":                _timestamp,
+                        "sign":                     _sign,
+                        "access_token":             _access_token,
+                        "shop_id":                  _shop_id,
+                        "order_sn_list":            _json.dumps([_test_sn]),
                         "response_optional_fields": "item_list",
                     }
 
                     _url = f"https://partner.shopeemobile.com{_shopee_api.ORDER_DETAIL_PATH}"
 
+                    # Direct requests.get() — no raise_for_status(), so 4xx/5xx
+                    # are displayed as-is rather than raised as exceptions.
                     _resp = _requests.get(
                         _url,
                         params=_params,
                         timeout=_shopee_api.REQUEST_TIMEOUT_SECONDS,
                     )
 
-                    # Display status code and raw body only — URL is never shown
-                    # because it contains access_token and signature.
-                    st.write(f"**HTTP Status:** {_resp.status_code}")
+                    # Display status + raw body. URL is never shown because
+                    # it contains access_token and signature.
+                    st.write(f"**HTTP Status:** `{_resp.status_code}`")
                     try:
                         st.json(_resp.json())
                     except Exception:
-                        st.code(_resp.text[:500])
+                        st.code(_resp.text[:1000])
 
-            except Exception as _e:
-                st.error(f"❌ Diagnostic error: {_e}")
+                except Exception as _e:
+                    st.error(f"❌ Diagnostic request error: {_e}")
         # END TEMPORARY DIAGNOSTIC — get_order_detail raw GET
 
         # ----------------------------------------------------------------
