@@ -551,8 +551,9 @@ def get_order_detail(
             len(order_sn_list),
         )
 
-        # GET endpoint: order_sn_list and response_optional_fields are
-        # passed as comma-joined query parameters, not a JSON body.
+        # GET endpoint: order_sn_list is sent as a comma-joined plain string,
+        # e.g. "ORDER_SN_A" for one order, "ORDER_SN_A,ORDER_SN_B" for two.
+        # Do NOT use json.dumps() — Shopee expects plain string, not a JSON array.
         params = {
             "order_sn_list": ",".join(batch),
         }

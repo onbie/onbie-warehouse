@@ -15,6 +15,9 @@ build/
 
 # Project files
 packed.csv
+packed_snapshots.csv
 data/shopee_orders.xlsx
+.env
+tokens.json
 .DS_Store
 *.xlsx
