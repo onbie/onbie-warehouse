@@ -134,7 +134,6 @@ with st.sidebar:
                     time_from=_time_from,
                     time_to=_time_to,
                     time_range_field="create_time",
-                    response_optional_fields=["order_status", "create_time", "update_time"],
                 )
                 _order_list = _result.get("order_list", [])
                 st.success(f"✅ API OK — {len(_order_list)} order ditemukan (24 jam terakhir)")
