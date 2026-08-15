@@ -509,7 +509,7 @@ def get_order_detail(
 ) -> List[Dict]:
     """Retrieve full order details for a list of order_sn values.
 
-    Calls POST /api/v2/order/get_order_detail.
+    Calls GET /api/v2/order/get_order_detail.
     Shopee accepts a maximum of 50 order_sn values per call.
     If more than 50 are provided, this function batches them automatically.
 
@@ -528,7 +528,7 @@ def get_order_detail(
 
     Raises:
         ValueError:    order_sn_list is empty.
-        RuntimeError, requests.* — see _shopee_post().
+        RuntimeError, requests.* — see _shopee_get().
     """
     if not order_sn_list:
         raise ValueError("order_sn_list must contain at least one order_sn.")
@@ -551,11 +551,15 @@ def get_order_detail(
             len(order_sn_list),
         )
 
-        body = {"order_sn_list": batch}  # type: Dict[str, Any]
+        # GET endpoint: order_sn_list and response_optional_fields are
+        # passed as comma-joined query parameters, not a JSON body.
+        params = {
+            "order_sn_list": ",".join(batch),
+        }
         if fields:
-            body["response_optional_fields"] = ",".join(fields)
+            params["response_optional_fields"] = ",".join(fields)
 
-        response = _shopee_post(ORDER_DETAIL_PATH, body)
+        response = _shopee_get(ORDER_DETAIL_PATH, params)
 
         order_list = response.get("order_list", [])
 
