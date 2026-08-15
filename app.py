@@ -159,6 +159,65 @@ with st.sidebar:
                 st.error(f"❌ Shopee API error: {_e}")
             except Exception as _e:
                 st.error(f"❌ Unexpected error: {_e}")
+
+        # TEMPORARY — get_order_detail test
+        # Uses the first order_sn from the get_order_list result above.
+        # Stores it in session state so the two buttons work independently.
+        if st.button("🧪 Test get_order_detail (1 order)", key="btn_test_order_detail"):
+            import shopee_api as _shopee_api
+            import time as _time
+
+            _time_to   = int(_time.time())
+            _time_from = _time_to - 86400
+
+            try:
+                # Step 1: get one order_sn from the list
+                _list_result = _shopee_api.get_order_list(
+                    time_from=_time_from,
+                    time_to=_time_to,
+                    time_range_field="create_time",
+                    page_size=1,
+                )
+                _list_orders = _list_result.get("order_list", [])
+
+                if not _list_orders:
+                    st.info("Tidak ada order dalam 24 jam terakhir untuk di-test.")
+                else:
+                    _test_sn = _list_orders[0].get("order_sn", "")
+                    st.write(f"Testing get_order_detail untuk order_sn: `{_test_sn}`")
+
+                    # Step 2: call get_order_detail with no optional fields first
+                    # to confirm the base call works before adding fields.
+                    _detail_result = _shopee_api.get_order_detail(
+                        order_sn_list=[_test_sn],
+                        response_optional_fields=["item_list"],
+                    )
+
+                    if not _detail_result:
+                        st.warning("get_order_detail returned empty list.")
+                    else:
+                        _d = _detail_result[0]
+                        st.success("✅ get_order_detail OK")
+
+                        # Display sanitised fields only — no tokens or credentials
+                        _safe = {
+                            "order_sn":    _d.get("order_sn", "-"),
+                            "order_status": _d.get("order_status", "-"),
+                        }
+                        _item_list = _d.get("item_list", None)
+                        if _item_list is not None:
+                            _safe["item_list"] = _item_list
+
+                        st.json(_safe)
+
+            except ValueError as _e:
+                st.error(f"❌ Parameter error: {_e}")
+            except RuntimeError as _e:
+                st.error(f"❌ Shopee API error: {_e}")
+            except Exception as _e:
+                st.error(f"❌ Unexpected error: {_e}")
+        # END TEMPORARY — get_order_detail test
+
         # ----------------------------------------------------------------
         # END TEMPORARY
         # ----------------------------------------------------------------
