@@ -116,6 +116,54 @@ with st.sidebar:
             except ValueError as e:
                 st.error(f"❌ {e}")
 
+        # ----------------------------------------------------------------
+        # TEMPORARY — remove after API testing is complete
+        # ----------------------------------------------------------------
+        st.divider()
+        st.caption("🧪 Temporary API Test")
+        if st.button("🧪 Test Shopee Order API", key="btn_test_shopee_api"):
+            import shopee_api as _shopee_api
+            import time as _time
+            import datetime as _datetime
+
+            _time_to   = int(_time.time())
+            _time_from = _time_to - 86400  # last 24 hours
+
+            try:
+                _result = _shopee_api.get_order_list(
+                    time_from=_time_from,
+                    time_to=_time_to,
+                    time_range_field="create_time",
+                    response_optional_fields=["order_status", "create_time", "update_time"],
+                )
+                _order_list = _result.get("order_list", [])
+                st.success(f"✅ API OK — {len(_order_list)} order ditemukan (24 jam terakhir)")
+
+                if _order_list:
+                    for _o in _order_list:
+                        _ct = _o.get("create_time", 0)
+                        _ut = _o.get("update_time", 0)
+                        _ct_str = _datetime.datetime.fromtimestamp(_ct).strftime("%Y-%m-%d %H:%M:%S") if _ct else "-"
+                        _ut_str = _datetime.datetime.fromtimestamp(_ut).strftime("%Y-%m-%d %H:%M:%S") if _ut else "-"
+                        st.json({
+                            "order_sn":    _o.get("order_sn", "-"),
+                            "order_status": _o.get("order_status", "-"),
+                            "create_time": _ct_str,
+                            "update_time": _ut_str,
+                        })
+                else:
+                    st.info("Tidak ada order dalam 24 jam terakhir.")
+
+            except ValueError as _e:
+                st.error(f"❌ Parameter error: {_e}")
+            except RuntimeError as _e:
+                st.error(f"❌ Shopee API error: {_e}")
+            except Exception as _e:
+                st.error(f"❌ Unexpected error: {_e}")
+        # ----------------------------------------------------------------
+        # END TEMPORARY
+        # ----------------------------------------------------------------
+
     else:
         st.warning("Belum terhubung ke Shopee")
 
