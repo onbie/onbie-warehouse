@@ -245,6 +245,65 @@ with st.sidebar:
         # END TEMPORARY DIAGNOSTIC — get_order_detail raw GET
 
         # ----------------------------------------------------------------
+        # TEMPORARY SHOPEE INTEGRATION TEST
+        # Proves real Shopee order data can flow from shopee_api into app.py.
+        # Stored in st.session_state only — no CSV/database writes.
+        # Remove this entire block when integration is promoted to production.
+        # ----------------------------------------------------------------
+        st.divider()
+        st.caption("🧪 Shopee Integration Test")
+
+        if st.button("🧪 Load Shopee Orders", key="btn_load_shopee_orders"):
+            import shopee_api as _shopee_api
+            import time as _time
+
+            _time_to   = int(_time.time())
+            _time_from = _time_to - 86400  # last 24 hours
+
+            with st.spinner("Fetching orders from Shopee..."):
+                try:
+                    _orders = _shopee_api.get_orders_with_detail(
+                        time_from=_time_from,
+                        time_to=_time_to,
+                        time_range_field="create_time",
+                        detail_optional_fields=["item_list"],
+                    )
+                    st.session_state["_shopee_orders_test"] = _orders
+                except ValueError as _e:
+                    st.error(f"❌ Parameter error: {_e}")
+                    st.session_state.pop("_shopee_orders_test", None)
+                except RuntimeError as _e:
+                    st.error(f"❌ Shopee API error: {_e}")
+                    st.session_state.pop("_shopee_orders_test", None)
+                except Exception as _e:
+                    st.error(f"❌ Unexpected error: {_e}")
+                    st.session_state.pop("_shopee_orders_test", None)
+
+        # Display results if available in session state
+        if "_shopee_orders_test" in st.session_state:
+            _orders = st.session_state["_shopee_orders_test"]
+            st.success(f"✅ {len(_orders)} order fetched dari Shopee (24 jam terakhir)")
+
+            for _o in _orders:
+                _sn     = _o.get("order_sn", "-")
+                _status = _o.get("order_status", "-")
+                _items  = _o.get("item_list", []) or []
+
+                with st.expander(f"📦 {_sn}  —  {_status}"):
+                    if not _items:
+                        st.caption("(no item_list returned)")
+                    for _item in _items:
+                        st.json({
+                            "item_name":  _item.get("item_name", "-"),
+                            "model_name": _item.get("model_name", "-"),
+                            "model_sku":  _item.get("model_sku", "-"),
+                            "qty":        _item.get("model_quantity_purchased", "-"),
+                        })
+        # ----------------------------------------------------------------
+        # END TEMPORARY SHOPEE INTEGRATION TEST
+        # ----------------------------------------------------------------
+
+        # ----------------------------------------------------------------
         # END TEMPORARY
         # ----------------------------------------------------------------
 
