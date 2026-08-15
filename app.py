@@ -211,14 +211,14 @@ with st.sidebar:
                         _partner_key,
                     )
 
-                    # order_sn_list sent as JSON array string per Shopee v2 spec.
+                    # order_sn_list sent as plain string (not JSON array).
                     _params = {
                         "partner_id":               _partner_id,
                         "timestamp":                _timestamp,
                         "sign":                     _sign,
                         "access_token":             _access_token,
                         "shop_id":                  _shop_id,
-                        "order_sn_list":            _json.dumps([_test_sn]),
+                        "order_sn_list":            _test_sn,
                         "response_optional_fields": "item_list",
                     }
 
