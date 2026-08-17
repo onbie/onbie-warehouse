@@ -76,6 +76,76 @@ def _handle_shopee_oauth():
 
 _handle_shopee_oauth()
 
+
+def adapt_shopee_api_to_df(orders_with_detail):
+    """Convert get_orders_with_detail() output into a DataFrame matching
+    the column shape the existing packing UI expects (same as orders_master.csv).
+
+    One row per product item — mirrors the EasyBoss multi-row structure.
+    Only confirmed-working Shopee API fields are mapped. Unconfirmed fields
+    (recipient address, tracking number, buyer username) are left as empty
+    strings and will be added in a later phase once verified.
+
+    Status mapping (Shopee API → internal packing status):
+        READY_TO_SHIP → "Perlu Dikirim"   (packable)
+        CANCELLED     → "Batal"
+        IN_CANCEL     → "Batal"
+        SHIPPED       → "Sedang Dikirim"
+        COMPLETED     → "Selesai"
+        anything else → passed through as-is
+    """
+    _STATUS_MAP = {
+        "READY_TO_SHIP": "Perlu Dikirim",
+        "CANCELLED":     "Batal",
+        "IN_CANCEL":     "Batal",
+        "SHIPPED":       "Sedang Dikirim",
+        "COMPLETED":     "Selesai",
+    }
+    _COLS = [
+        "No. Pesanan", "No. Resi", "Username (Pembeli)", "Nama Penerima",
+        "Kota/Kabupaten", "Provinsi", "SKU Induk", "Nama Produk", "Nama Barang",
+        "Nama Variasi", "Jumlah", "Berat (Kg)", "Status Pesanan",
+        "Waktu Pesanan Dibuat", "Tenggat Pengiriman", "Antar ke counter/ pick-up",
+        "Catatan dari Pembeli", "Platform", "Toko", "Sumber",
+    ]
+
+    rows = []
+    for order in (orders_with_detail or []):
+        order_sn   = str(order.get("order_sn", "")).strip()
+        raw_status = str(order.get("order_status", "")).strip()
+        status     = _STATUS_MAP.get(raw_status, raw_status)
+        item_list  = order.get("item_list") or []
+
+        if not item_list:
+            # No items returned — placeholder row so the order still appears
+            # when scanned by order_sn, even without product detail.
+            rows.append({c: "" for c in _COLS})
+            rows[-1].update({
+                "No. Pesanan":    order_sn,
+                "Status Pesanan": status,
+                "Platform":       "Shopee",
+                "Sumber":         "Shopee API",
+                "Jumlah":         0,
+            })
+        else:
+            for item in item_list:
+                row = {c: "" for c in _COLS}
+                row.update({
+                    "No. Pesanan":    order_sn,
+                    "SKU Induk":      str(item.get("item_sku", "") or ""),
+                    "Nama Produk":    str(item.get("item_name", "") or ""),
+                    "Nama Barang":    str(item.get("item_name", "") or ""),
+                    "Nama Variasi":   str(item.get("model_name", "") or ""),
+                    "Jumlah":         int(item.get("model_quantity_purchased", 0) or 0),
+                    "Status Pesanan": status,
+                    "Platform":       "Shopee",
+                    "Sumber":         "Shopee API",
+                })
+                rows.append(row)
+
+    return pd.DataFrame(rows, columns=_COLS) if rows else pd.DataFrame(columns=_COLS)
+
+
 # ---- Shopee Integration sidebar ----
 # Entirely in the sidebar so it never interferes with the packing UI layout.
 # The packing checker works normally regardless of Shopee connection status.
@@ -304,6 +374,45 @@ with st.sidebar:
         # ----------------------------------------------------------------
 
         # ----------------------------------------------------------------
+        # Phase 1 — Shopee direct packing queue sync
+        # ----------------------------------------------------------------
+        st.divider()
+        if "shopee_orders_df" in st.session_state:
+            _n_synced = st.session_state["shopee_orders_df"]["No. Pesanan"].nunique()
+            st.success(f"✅ Packing queue: {_n_synced} order dari Shopee")
+
+        if st.button("🔄 Sync Orders dari Shopee", key="btn_sync_shopee_orders"):
+            import shopee_api as _shopee_api_sync
+            import time as _time_sync
+
+            _time_to_sync   = int(_time_sync.time())
+            _time_from_sync = _time_to_sync - 7 * 86400  # last 7 days
+
+            with st.spinner("Fetching READY_TO_SHIP orders..."):
+                try:
+                    _raw_orders = _shopee_api_sync.get_orders_with_detail(
+                        time_from=_time_from_sync,
+                        time_to=_time_to_sync,
+                        time_range_field="create_time",
+                        order_status="READY_TO_SHIP",
+                        detail_optional_fields=["item_list"],
+                    )
+                    _synced_df = adapt_shopee_api_to_df(_raw_orders)
+                    st.session_state["shopee_orders_df"] = _synced_df
+                    _n = _synced_df["No. Pesanan"].nunique()
+                    st.success(f"✅ {_n} order READY_TO_SHIP di-load ke packing queue")
+                    st.cache_data.clear()
+                except RuntimeError as _e:
+                    st.error(f"❌ Shopee API error: {_e}")
+                except ValueError as _e:
+                    st.error(f"❌ Parameter error: {_e}")
+                except Exception as _e:
+                    st.error(f"❌ Error: {_e}")
+        # ----------------------------------------------------------------
+        # END Phase 1
+        # ----------------------------------------------------------------
+
+        # ----------------------------------------------------------------
         # END TEMPORARY
         # ----------------------------------------------------------------
 
@@ -468,7 +577,6 @@ def focus_search_box():
     )
 
 
-# ---- Session state for scan -> display -> confirm workflow ----
 if "displayed_order" not in st.session_state:
     st.session_state.displayed_order = None
 if "just_packed_order" not in st.session_state:
@@ -477,7 +585,12 @@ if "not_found_query" not in st.session_state:
     st.session_state.not_found_query = None
 
 
-orders_df = load_orders()
+# Use Shopee-synced DataFrame when available; fall back to CSV (EasyBoss/legacy).
+# All packing/search/verify/pack logic below reads orders_df unchanged.
+if "shopee_orders_df" in st.session_state:
+    orders_df = st.session_state["shopee_orders_df"]
+else:
+    orders_df = load_orders()
 
 if orders_df.empty:
     st.warning("No orders loaded. Please check data/orders_master.csv")
