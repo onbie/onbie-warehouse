@@ -96,6 +96,7 @@ def adapt_shopee_api_to_df(orders_with_detail):
     """
     _STATUS_MAP = {
         "READY_TO_SHIP": "Perlu Dikirim",
+        "PROCESSED":     "Perlu Dikirim",
         "CANCELLED":     "Batal",
         "IN_CANCEL":     "Batal",
         "SHIPPED":       "Sedang Dikirim",
@@ -390,13 +391,28 @@ with st.sidebar:
 
             with st.spinner("Fetching READY_TO_SHIP orders..."):
                 try:
-                    _raw_orders = _shopee_api_sync.get_orders_with_detail(
+                    _raw_rts = _shopee_api_sync.get_orders_with_detail(
                         time_from=_time_from_sync,
                         time_to=_time_to_sync,
                         time_range_field="create_time",
                         order_status="READY_TO_SHIP",
                         detail_optional_fields=["item_list"],
                     )
+                    _raw_proc = _shopee_api_sync.get_orders_with_detail(
+                        time_from=_time_from_sync,
+                        time_to=_time_to_sync,
+                        time_range_field="create_time",
+                        order_status="PROCESSED",
+                        detail_optional_fields=["item_list"],
+                    )
+                    # Deduplicate by order_sn — keep first occurrence
+                    _seen = set()
+                    _raw_orders = []
+                    for _o in (_raw_rts + _raw_proc):
+                        _sn = _o.get("order_sn", "")
+                        if _sn not in _seen:
+                            _seen.add(_sn)
+                            _raw_orders.append(_o)
                     _synced_df = adapt_shopee_api_to_df(_raw_orders)
                     st.session_state["shopee_orders_df"] = _synced_df
                     _n = _synced_df["No. Pesanan"].nunique()
