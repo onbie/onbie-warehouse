@@ -9,6 +9,7 @@ st.title("📦 Shopee Packing Checker")
 
 DATA_FILE = "data/orders_master.csv"
 PACKED_FILE = "packed.csv"
+SHOPEE_DATA_FILE = "data/shopee_orders.csv"
 
 # ---- Shopee OAuth callback handler ----
 # Runs once per page load. If Shopee redirected back here with ?code=&shop_id=,
@@ -414,6 +415,8 @@ with st.sidebar:
                             _seen.add(_sn)
                             _raw_orders.append(_o)
                     _synced_df = adapt_shopee_api_to_df(_raw_orders)
+                    os.makedirs("data", exist_ok=True)
+                    _synced_df.to_csv(SHOPEE_DATA_FILE, index=False)
                     st.session_state["shopee_orders_df"] = _synced_df
                     _n = _synced_df["No. Pesanan"].nunique()
                     st.success(f"✅ {_n} order READY_TO_SHIP di-load ke packing queue")
@@ -502,6 +505,24 @@ def load_orders():
         st.error(f"❌ Data file not found: {DATA_FILE}")
         return pd.DataFrame()
     df = pd.read_csv(DATA_FILE)
+    df.columns = [str(c).strip() for c in df.columns]
+    return df
+
+
+def load_shopee_orders():
+    """Load the last Shopee-synced orders from SHOPEE_DATA_FILE.
+    Returns an empty DataFrame with the correct columns if the file
+    does not exist (i.e. no sync has been performed yet)."""
+    _COLS = [
+        "No. Pesanan", "No. Resi", "Username (Pembeli)", "Nama Penerima",
+        "Kota/Kabupaten", "Provinsi", "SKU Induk", "Nama Produk", "Nama Barang",
+        "Nama Variasi", "Jumlah", "Berat (Kg)", "Status Pesanan",
+        "Waktu Pesanan Dibuat", "Tenggat Pengiriman", "Antar ke counter/ pick-up",
+        "Catatan dari Pembeli", "Platform", "Toko", "Sumber",
+    ]
+    if not os.path.exists(SHOPEE_DATA_FILE):
+        return pd.DataFrame(columns=_COLS)
+    df = pd.read_csv(SHOPEE_DATA_FILE)
     df.columns = [str(c).strip() for c in df.columns]
     return df
 
@@ -601,12 +622,13 @@ if "not_found_query" not in st.session_state:
     st.session_state.not_found_query = None
 
 
-# Use Shopee-synced DataFrame when available; fall back to CSV (EasyBoss/legacy).
-# All packing/search/verify/pack logic below reads orders_df unchanged.
+# Use Shopee-synced DataFrame when available (fast path, same session).
+# On reload, fall back to the last persisted shopee_orders.csv sync.
+# EasyBoss/orders_master.csv is no longer used as the primary fallback.
 if "shopee_orders_df" in st.session_state:
     orders_df = st.session_state["shopee_orders_df"]
 else:
-    orders_df = load_orders()
+    orders_df = load_shopee_orders()
 
 if orders_df.empty:
     st.warning("No orders loaded. Please check data/orders_master.csv")
