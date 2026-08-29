@@ -118,30 +118,43 @@ def adapt_shopee_api_to_df(orders_with_detail):
         status     = _STATUS_MAP.get(raw_status, raw_status)
         item_list  = order.get("item_list") or []
 
+        # Order-level fields — confirmed working optional fields only
+        buyer_username = str(order.get("buyer_username", "") or "")
+        recipient      = order.get("recipient_address") or {}
+        nama_penerima  = str(recipient.get("name", "") or "")
+        kota           = str(recipient.get("city", "") or "")
+        provinsi       = str(recipient.get("state", "") or "")
+
         if not item_list:
-            # No items returned — placeholder row so the order still appears
-            # when scanned by order_sn, even without product detail.
             rows.append({c: "" for c in _COLS})
             rows[-1].update({
-                "No. Pesanan":    order_sn,
-                "Status Pesanan": status,
-                "Platform":       "Shopee",
-                "Sumber":         "Shopee API",
-                "Jumlah":         0,
+                "No. Pesanan":       order_sn,
+                "Username (Pembeli)": buyer_username,
+                "Nama Penerima":     nama_penerima,
+                "Kota/Kabupaten":    kota,
+                "Provinsi":          provinsi,
+                "Status Pesanan":    status,
+                "Platform":          "Shopee",
+                "Sumber":            "Shopee API",
+                "Jumlah":            0,
             })
         else:
             for item in item_list:
                 row = {c: "" for c in _COLS}
                 row.update({
-                    "No. Pesanan":    order_sn,
-                    "SKU Induk":      str(item.get("item_sku", "") or ""),
-                    "Nama Produk":    str(item.get("item_name", "") or ""),
-                    "Nama Barang":    str(item.get("item_name", "") or ""),
-                    "Nama Variasi":   str(item.get("model_name", "") or ""),
-                    "Jumlah":         int(item.get("model_quantity_purchased", 0) or 0),
-                    "Status Pesanan": status,
-                    "Platform":       "Shopee",
-                    "Sumber":         "Shopee API",
+                    "No. Pesanan":       order_sn,
+                    "Username (Pembeli)": buyer_username,
+                    "Nama Penerima":     nama_penerima,
+                    "Kota/Kabupaten":    kota,
+                    "Provinsi":          provinsi,
+                    "SKU Induk":         str(item.get("item_sku", "") or ""),
+                    "Nama Produk":       str(item.get("item_name", "") or ""),
+                    "Nama Barang":       str(item.get("item_name", "") or ""),
+                    "Nama Variasi":      str(item.get("model_name", "") or ""),
+                    "Jumlah":            int(item.get("model_quantity_purchased", 0) or 0),
+                    "Status Pesanan":    status,
+                    "Platform":          "Shopee",
+                    "Sumber":            "Shopee API",
                 })
                 rows.append(row)
 
@@ -397,14 +410,14 @@ with st.sidebar:
                         time_to=_time_to_sync,
                         time_range_field="create_time",
                         order_status="READY_TO_SHIP",
-                        detail_optional_fields=["item_list"],
+                        detail_optional_fields=["item_list", "buyer_username", "recipient_address"],
                     )
                     _raw_proc = _shopee_api_sync.get_orders_with_detail(
                         time_from=_time_from_sync,
                         time_to=_time_to_sync,
                         time_range_field="create_time",
                         order_status="PROCESSED",
-                        detail_optional_fields=["item_list"],
+                        detail_optional_fields=["item_list", "buyer_username", "recipient_address"],
                     )
                     # Deduplicate by order_sn — keep first occurrence
                     _seen = set()
