@@ -696,6 +696,63 @@ def build_report_table_rows(rows_df):
     return "".join(html_rows)
 
 
+# CSS for "Order Belum Diverifikasi", copied from the values used to
+# render "Laporan Packing Hari Ini" below (that table's dark background,
+# borders, rounded corners, alignment, and padding are the visual source
+# of truth here) so the two tables look identical.
+BELUM_DIVERIFIKASI_TABLE_STYLE = """
+<style>
+.belum-diverifikasi-wrapper {
+    border: 1px solid rgba(250, 250, 250, 0.2);
+    border-radius: 8px;
+    overflow: hidden;
+    width: 100%;
+}
+.belum-diverifikasi-table {
+    border-collapse: collapse;
+    width: 100%;
+    background-color: #0e1117;
+    color: #fafafa;
+    font-size: 14px;
+}
+.belum-diverifikasi-table th {
+    background-color: #262730;
+    color: #fafafa;
+    font-weight: 600;
+    text-align: left;
+    padding: 8px 14px;
+    border: 1px solid rgba(250, 250, 250, 0.2);
+}
+.belum-diverifikasi-table td {
+    text-align: left;
+    vertical-align: middle;
+    padding: 8px 14px;
+    border: 1px solid rgba(250, 250, 250, 0.2);
+}
+.belum-diverifikasi-table td.belum-diverifikasi-qty-cell {
+    text-align: right;
+}
+</style>
+"""
+
+
+def build_belum_table_rows(rows_df):
+    """Render "Order Belum Diverifikasi" rows as HTML <tr> elements — one
+    row per order (rows_df is already deduplicated to one row per order
+    upstream, so no rowspan grouping is needed here)."""
+    cols = ["Order Number", "Username", "Recipient", "Platform", "Shop",
+            "Province", "Shipping", "Variant"]
+    html_rows = []
+    for _, r in rows_df.iterrows():
+        html_rows.append("<tr>")
+        for col in cols:
+            html_rows.append(f"<td>{_report_cell_value(r.get(col))}</td>")
+        qty = int(r.get('Qty', 0)) if pd.notna(r.get('Qty')) else 0
+        html_rows.append(f'<td class="belum-diverifikasi-qty-cell">{qty}</td>')
+        html_rows.append("</tr>")
+    return "".join(html_rows)
+
+
 def focus_search_box():
     components.html(
         """
@@ -987,23 +1044,32 @@ else:
     if belum_df.empty:
         st.success("Tidak ada order 'Perlu Dikirim' yang belum diverifikasi.")
     else:
-        styled_belum_df = style_dashboard_table(
-            belum_df.rename(columns={
-                "No. Pesanan": "Order Number",
-                "Username (Pembeli)": "Username",
-                "Nama Penerima": "Recipient",
-                "Platform": "Platform",
-                "Toko": "Shop",
-                "Provinsi": "Province",
-                "Antar ke counter/ pick-up": "Shipping",
-                "Nama Variasi": "Variant",
-                "Jumlah": "Qty",
-            })[["Order Number", "Username", "Recipient", "Platform", "Shop", "Province", "Shipping", "Variant", "Qty"]]
-        )
-        st.dataframe(
-            styled_belum_df,
-            use_container_width=True,
-            hide_index=True,
+        belum_display_df = belum_df.rename(columns={
+            "No. Pesanan": "Order Number",
+            "Username (Pembeli)": "Username",
+            "Nama Penerima": "Recipient",
+            "Platform": "Platform",
+            "Toko": "Shop",
+            "Provinsi": "Province",
+            "Antar ke counter/ pick-up": "Shipping",
+            "Nama Variasi": "Variant",
+            "Jumlah": "Qty",
+        })[["Order Number", "Username", "Recipient", "Platform", "Shop", "Province", "Shipping", "Variant", "Qty"]]
+
+        belum_table_rows = build_belum_table_rows(belum_display_df)
+        st.markdown(
+            f"""
+            {BELUM_DIVERIFIKASI_TABLE_STYLE}
+            <div class="belum-diverifikasi-wrapper">
+            <table class="belum-diverifikasi-table">
+                <tr>
+                    <th>Order Number</th><th>Username</th><th>Recipient</th><th>Platform</th><th>Shop</th><th>Province</th><th>Shipping</th><th>Variant</th><th>Qty</th>
+                </tr>
+                {belum_table_rows}
+            </table>
+            </div>
+            """,
+            unsafe_allow_html=True,
         )
 
     # ---- Daily packing report (all orders packed today) ----
