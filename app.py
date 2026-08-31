@@ -1040,8 +1040,12 @@ else:
 
         # On-screen table: one row per product/variant, with order-level
         # columns visually merged (rowspan) across an order's variant rows.
-        # Styling mirrors the "Order Belum Diverifikasi" table above (same
-        # borders, padding, alignment, dark header, compact row height).
+        # CSS below is a literal translation of style_dashboard_table()'s
+        # set_table_styles() rules — the exact same styler used to render
+        # "Order Belum Diverifikasi" above — so this table reuses that
+        # table's real styling as source of truth rather than a new design.
+        # (st.dataframe itself can't do rowspan, so an HTML table is the
+        # only way to merge cells; everything else mirrors that styler.)
         onscreen_table_rows = build_report_table_rows(report_rows)
         st.markdown(
             f"""
@@ -1049,18 +1053,19 @@ else:
             .daily-report-onscreen-table {{
                 border-collapse: collapse;
                 width: 100%;
-                font-size: 14px;
-            }}
-            .daily-report-onscreen-table th, .daily-report-onscreen-table td {{
-                border: 1px solid #e0e0e0;
-                padding: 8px 12px;
-                text-align: center;
-                vertical-align: middle;
             }}
             .daily-report-onscreen-table th {{
-                background-color: #262730;
-                color: #ffffff;
+                text-align: center;
+                vertical-align: middle;
+                padding: 12px;
                 font-weight: bold;
+                border: 1px solid #e0e0e0;
+            }}
+            .daily-report-onscreen-table td {{
+                text-align: center;
+                vertical-align: middle;
+                padding: 12px;
+                border: 1px solid #e0e0e0;
             }}
             </style>
             <table class="daily-report-onscreen-table">
