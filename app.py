@@ -691,7 +691,7 @@ def build_report_table_rows(rows_df):
                     html_rows.append(f'<td rowspan="{n}">{_report_cell_value(r.get(col))}</td>')
             qty = int(r.get('Jumlah', 0)) if pd.notna(r.get('Jumlah')) else 0
             html_rows.append(f"<td>{_report_cell_value(r.get('Nama Variasi'))}</td>")
-            html_rows.append(f"<td>{qty}</td>")
+            html_rows.append(f'<td class="daily-report-qty-cell">{qty}</td>')
             html_rows.append("</tr>")
     return "".join(html_rows)
 
@@ -1040,40 +1040,56 @@ else:
 
         # On-screen table: one row per product/variant, with order-level
         # columns visually merged (rowspan) across an order's variant rows.
-        # CSS below is a literal translation of style_dashboard_table()'s
-        # set_table_styles() rules — the exact same styler used to render
-        # "Order Belum Diverifikasi" above — so this table reuses that
-        # table's real styling as source of truth rather than a new design.
-        # (st.dataframe itself can't do rowspan, so an HTML table is the
-        # only way to merge cells; everything else mirrors that styler.)
+        # st.dataframe() can't do rowspan, so this stays an HTML table, but
+        # the CSS below reproduces "Order Belum Diverifikasi" as it actually
+        # renders (dark background, subtle borders, rounded outer corners,
+        # left-aligned text / right-aligned numeric column, compact rows) —
+        # that widget ignores style_dashboard_table()'s Styler CSS at
+        # render time, so its real appearance (not the unused Styler rules)
+        # is the source of truth being matched here.
         onscreen_table_rows = build_report_table_rows(report_rows)
         st.markdown(
             f"""
             <style>
+            .daily-report-onscreen-wrapper {{
+                border: 1px solid rgba(250, 250, 250, 0.2);
+                border-radius: 8px;
+                overflow: hidden;
+                width: 100%;
+            }}
             .daily-report-onscreen-table {{
                 border-collapse: collapse;
                 width: 100%;
+                background-color: #0e1117;
+                color: #fafafa;
+                font-size: 14px;
             }}
             .daily-report-onscreen-table th {{
-                text-align: center;
-                vertical-align: middle;
-                padding: 12px;
-                font-weight: bold;
-                border: 1px solid #e0e0e0;
+                background-color: #262730;
+                color: #fafafa;
+                font-weight: 600;
+                text-align: left;
+                padding: 8px 14px;
+                border: 1px solid rgba(250, 250, 250, 0.2);
             }}
             .daily-report-onscreen-table td {{
-                text-align: center;
+                text-align: left;
                 vertical-align: middle;
-                padding: 12px;
-                border: 1px solid #e0e0e0;
+                padding: 8px 14px;
+                border: 1px solid rgba(250, 250, 250, 0.2);
+            }}
+            .daily-report-onscreen-table td.daily-report-qty-cell {{
+                text-align: right;
             }}
             </style>
+            <div class="daily-report-onscreen-wrapper">
             <table class="daily-report-onscreen-table">
                 <tr>
                     <th>Order Number</th><th>Username</th><th>Recipient</th><th>Platform</th><th>Shop</th><th>Province</th><th>Kabupaten/Kota</th><th>Shipping</th><th>Variant</th><th>Qty</th>
                 </tr>
                 {onscreen_table_rows}
             </table>
+            </div>
             """,
             unsafe_allow_html=True,
         )
