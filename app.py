@@ -654,6 +654,22 @@ def style_dashboard_table(df, wrap_columns=None):
     return styler
 
 
+def _report_cell_value(val, default="-"):
+    """Render a report cell value safely: pandas/numpy NaN, None, or blank
+    strings all fall back to '-' instead of literal 'nan' text."""
+    if val is None:
+        return default
+    try:
+        if pd.isna(val):
+            return default
+    except (TypeError, ValueError):
+        pass
+    s = str(val).strip()
+    if not s or s.lower() == "nan":
+        return default
+    return s
+
+
 def build_report_table_rows(rows_df):
     """Render Daily Packing Report rows as HTML <tr> elements, one row per
     product/variant. Order-level columns (No. Pesanan, Username, Nama
@@ -672,9 +688,9 @@ def build_report_table_rows(rows_df):
             html_rows.append("<tr>")
             if i == 0:
                 for col in order_level_cols:
-                    html_rows.append(f'<td rowspan="{n}">{r.get(col, "-")}</td>')
+                    html_rows.append(f'<td rowspan="{n}">{_report_cell_value(r.get(col))}</td>')
             qty = int(r.get('Jumlah', 0)) if pd.notna(r.get('Jumlah')) else 0
-            html_rows.append(f"<td>{r.get('Nama Variasi', '-')}</td>")
+            html_rows.append(f"<td>{_report_cell_value(r.get('Nama Variasi'))}</td>")
             html_rows.append(f"<td>{qty}</td>")
             html_rows.append("</tr>")
     return "".join(html_rows)
@@ -1024,6 +1040,8 @@ else:
 
         # On-screen table: one row per product/variant, with order-level
         # columns visually merged (rowspan) across an order's variant rows.
+        # Styling mirrors the "Order Belum Diverifikasi" table above (same
+        # borders, padding, alignment, dark header, compact row height).
         onscreen_table_rows = build_report_table_rows(report_rows)
         st.markdown(
             f"""
@@ -1031,14 +1049,17 @@ else:
             .daily-report-onscreen-table {{
                 border-collapse: collapse;
                 width: 100%;
+                font-size: 14px;
             }}
             .daily-report-onscreen-table th, .daily-report-onscreen-table td {{
                 border: 1px solid #e0e0e0;
-                padding: 12px;
+                padding: 8px 12px;
                 text-align: center;
                 vertical-align: middle;
             }}
             .daily-report-onscreen-table th {{
+                background-color: #262730;
+                color: #ffffff;
                 font-weight: bold;
             }}
             </style>
