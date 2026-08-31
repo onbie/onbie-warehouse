@@ -994,6 +994,21 @@ else:
             ]
             report_rows = pd.concat([report_rows, fallback_rows], ignore_index=True)
 
+        # Group multi-item orders into a single row: order-level fields keep
+        # their first value, variants are combined into one cell, and Jumlah
+        # is summed across all product rows for that order.
+        report_rows = report_rows.groupby("No. Pesanan", as_index=False).agg({
+            "Username (Pembeli)": "first",
+            "Nama Penerima": "first",
+            "Platform": "first",
+            "Toko": "first",
+            "Provinsi": "first",
+            "Kota/Kabupaten": "first",
+            "Antar ke counter/ pick-up": "first",
+            "Nama Variasi": lambda variants: " + ".join(str(v) for v in variants),
+            "Jumlah": "sum",
+        })
+
         st.write(f"**{len(today_order_numbers)} order** sudah di-pack hari ini ({today_str})")
 
         report_df = report_rows[
