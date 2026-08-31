@@ -654,6 +654,32 @@ def style_dashboard_table(df, wrap_columns=None):
     return styler
 
 
+def build_report_table_rows(rows_df):
+    """Render Daily Packing Report rows as HTML <tr> elements, one row per
+    product/variant. Order-level columns (No. Pesanan, Username, Nama
+    Penerima, Platform, Toko, Provinsi, Kota/Kabupaten, Antar ke counter/
+    pick-up) are merged vertically with rowspan when an order has more than
+    one product/variant row, so the order's info visually appears once
+    while Nama Variasi and Jumlah keep their own row per product."""
+    order_level_cols = [
+        "No. Pesanan", "Username (Pembeli)", "Nama Penerima", "Platform",
+        "Toko", "Provinsi", "Kota/Kabupaten", "Antar ke counter/ pick-up",
+    ]
+    html_rows = []
+    for _, group in rows_df.groupby("No. Pesanan", sort=False):
+        n = len(group)
+        for i, (_, r) in enumerate(group.iterrows()):
+            html_rows.append("<tr>")
+            if i == 0:
+                for col in order_level_cols:
+                    html_rows.append(f'<td rowspan="{n}">{r.get(col, "-")}</td>')
+            qty = int(r.get('Jumlah', 0)) if pd.notna(r.get('Jumlah')) else 0
+            html_rows.append(f"<td>{r.get('Nama Variasi', '-')}</td>")
+            html_rows.append(f"<td>{qty}</td>")
+            html_rows.append("</tr>")
+    return "".join(html_rows)
+
+
 def focus_search_box():
     components.html(
         """
@@ -994,65 +1020,40 @@ else:
             ]
             report_rows = pd.concat([report_rows, fallback_rows], ignore_index=True)
 
-        # Group multi-item orders into a single row: order-level fields keep
-        # their first value, variants are combined into one cell, and Jumlah
-        # is summed across all product rows for that order.
-        report_rows = report_rows.groupby("No. Pesanan", as_index=False).agg({
-            "Username (Pembeli)": "first",
-            "Nama Penerima": "first",
-            "Platform": "first",
-            "Toko": "first",
-            "Provinsi": "first",
-            "Kota/Kabupaten": "first",
-            "Antar ke counter/ pick-up": "first",
-            "Nama Variasi": lambda variants: " + ".join(str(v) for v in variants),
-            "Jumlah": "sum",
-        })
-
         st.write(f"**{len(today_order_numbers)} order** sudah di-pack hari ini ({today_str})")
 
-        report_df = report_rows[
-            ["No. Pesanan", "Username (Pembeli)", "Nama Penerima", "Platform", "Toko", "Provinsi", "Kota/Kabupaten", "Antar ke counter/ pick-up", "Nama Variasi", "Jumlah"]
-        ].copy()
-
-        styled_report_df = style_dashboard_table(
-            report_df.rename(columns={
-                "No. Pesanan": "Order Number",
-                "Username (Pembeli)": "Username",
-                "Nama Penerima": "Recipient",
-                "Platform": "Platform",
-                "Toko": "Shop",
-                "Provinsi": "Province",
-                "Kota/Kabupaten": "Kabupaten/Kota",
-                "Antar ke counter/ pick-up": "Shipping",
-                "Nama Variasi": "Variant",
-                "Jumlah": "Qty"
-            })
-        )
-        st.dataframe(
-            styled_report_df,
-            use_container_width=True,
-            hide_index=True,
-        )
-
-        # Build printable daily report HTML
-        report_table_rows = "".join(
+        # On-screen table: one row per product/variant, with order-level
+        # columns visually merged (rowspan) across an order's variant rows.
+        onscreen_table_rows = build_report_table_rows(report_rows)
+        st.markdown(
             f"""
-            <tr>
-                <td>{r.get('No. Pesanan','-')}</td>
-                <td>{r.get('Username (Pembeli)','-')}</td>
-                <td>{r.get('Nama Penerima','-')}</td>
-                <td>{r.get('Platform','-')}</td>
-                <td>{r.get('Toko','-')}</td>
-                <td>{r.get('Provinsi','-')}</td>
-                <td>{r.get('Kota/Kabupaten','-')}</td>
-                <td>{r.get('Antar ke counter/ pick-up','-')}</td>
-                <td>{r.get('Nama Variasi','-')}</td>
-                <td>{int(r.get('Jumlah',0)) if pd.notna(r.get('Jumlah')) else 0}</td>
-            </tr>
-            """
-            for _, r in report_rows.iterrows()
+            <style>
+            .daily-report-onscreen-table {{
+                border-collapse: collapse;
+                width: 100%;
+            }}
+            .daily-report-onscreen-table th, .daily-report-onscreen-table td {{
+                border: 1px solid #e0e0e0;
+                padding: 12px;
+                text-align: center;
+                vertical-align: middle;
+            }}
+            .daily-report-onscreen-table th {{
+                font-weight: bold;
+            }}
+            </style>
+            <table class="daily-report-onscreen-table">
+                <tr>
+                    <th>Order Number</th><th>Username</th><th>Recipient</th><th>Platform</th><th>Shop</th><th>Province</th><th>Kabupaten/Kota</th><th>Shipping</th><th>Variant</th><th>Qty</th>
+                </tr>
+                {onscreen_table_rows}
+            </table>
+            """,
+            unsafe_allow_html=True,
         )
+
+        # Build printable daily report HTML — same rowspan grouping as on-screen
+        report_table_rows = build_report_table_rows(report_rows)
 
         daily_report_html = f"""
         <html>
