@@ -10,6 +10,12 @@ st.title("📦 Shopee Packing Checker")
 DATA_FILE = "data/orders_master.csv"
 PACKED_FILE = "packed.csv"
 SHOPEE_DATA_FILE = "data/shopee_orders.csv"
+SNAPSHOT_FILE = "packed_snapshots.csv"
+SNAPSHOT_COLUMNS = [
+    "order_number", "packed_at", "No. Pesanan", "Username (Pembeli)",
+    "Nama Penerima", "Platform", "Toko", "Provinsi", "Kota/Kabupaten",
+    "Antar ke counter/ pick-up", "Nama Variasi", "Jumlah",
+]
 
 # ---- Shopee OAuth callback handler ----
 # Runs once per page load. If Shopee redirected back here with ?code=&shop_id=,
@@ -563,16 +569,56 @@ def get_packed_at(order_number):
     return None
 
 
-def save_packed_order(order_number):
+def load_snapshots_df():
+    if os.path.exists(SNAPSHOT_FILE):
+        df = pd.read_csv(SNAPSHOT_FILE)
+        df["order_number"] = df["order_number"].astype(str).str.strip()
+        return df
+    return pd.DataFrame(columns=SNAPSHOT_COLUMNS)
+
+
+def save_packed_snapshot(order_number, order_rows, packed_at):
+    """Save a permanent snapshot of this order's product rows at pack time,
+    so the Daily Packing Report keeps working even after orders_df has since
+    moved on (new EasyBoss import, Shopee sync, etc.). One row is saved per
+    product row so multi-item orders are preserved. Never deletes old
+    snapshots (no retention/pruning) and never duplicates an order that
+    already has a snapshot."""
+    if order_rows is None or order_rows.empty:
+        return
+    existing = load_snapshots_df()
+    if order_number in set(existing["order_number"]):
+        return  # already snapshotted, don't duplicate
+    new_rows = pd.DataFrame({
+        "order_number": order_number,
+        "packed_at": packed_at,
+        "No. Pesanan": order_rows.get("No. Pesanan", "-"),
+        "Username (Pembeli)": order_rows.get("Username (Pembeli)", "-"),
+        "Nama Penerima": order_rows.get("Nama Penerima", "-"),
+        "Platform": order_rows.get("Platform", "-"),
+        "Toko": order_rows.get("Toko", "-"),
+        "Provinsi": order_rows.get("Provinsi", "-"),
+        "Kota/Kabupaten": order_rows.get("Kota/Kabupaten", "-"),
+        "Antar ke counter/ pick-up": order_rows.get("Antar ke counter/ pick-up", "-"),
+        "Nama Variasi": order_rows.get("Nama Variasi", "-"),
+        "Jumlah": order_rows.get("Jumlah", 0),
+    })
+    combined = pd.concat([existing, new_rows], ignore_index=True)
+    combined.to_csv(SNAPSHOT_FILE, index=False)
+
+
+def save_packed_order(order_number, order_rows=None):
     df = load_packed_df()
     order_number = str(order_number).strip()
+    packed_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     if order_number not in set(df["order_number"]):
         new_row = pd.DataFrame([{
             "order_number": order_number,
-            "packed_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "packed_at": packed_at,
         }])
         df = pd.concat([df, new_row], ignore_index=True)
     df.to_csv(PACKED_FILE, index=False)
+    save_packed_snapshot(order_number, order_rows, packed_at)
 
 
 def style_dashboard_table(df, wrap_columns=None):
@@ -696,7 +742,7 @@ else:
                     packable = is_packable_status(status)
                     already_packed = order_number in packed_orders
                     if packable and not already_packed:
-                        save_packed_order(order_number)
+                        save_packed_order(order_number, results)
                         st.session_state.just_packed_order = order_number
 
     # ---- Order not found banner ----
@@ -778,7 +824,7 @@ else:
                     st.button("✅ Sudah Di-Pack", disabled=True, key="btn_already_packed")
                 else:
                     if st.button("📌 Mark as Packed", key="btn_manual_pack", use_container_width=True):
-                        save_packed_order(order_number)
+                        save_packed_order(order_number, results)
                         st.session_state.just_packed_order = order_number
                         st.rerun()
 
@@ -929,11 +975,24 @@ else:
     if today_packed_df.empty:
         st.info("Belum ada order yang di-pack hari ini.")
     else:
-        # Merge with order data to get product/buyer details, one row per order
         today_order_numbers = set(today_packed_df["order_number"])
-        report_rows = orders_df[
-            orders_df["No. Pesanan"].astype(str).str.strip().isin(today_order_numbers)
-        ]
+
+        # Read product/buyer details from the pack-time snapshot first, so
+        # this report stays correct even if orders_df has since moved on
+        # (new import / Shopee sync). Orders packed before a snapshot
+        # exists for them fall back to the live orders_df lookup.
+        snapshots_df = load_snapshots_df()
+        snapshot_rows = snapshots_df[snapshots_df["order_number"].isin(today_order_numbers)]
+        snapshotted_order_numbers = set(snapshot_rows["order_number"])
+        missing_order_numbers = today_order_numbers - snapshotted_order_numbers
+
+        report_rows = snapshot_rows.drop(columns=["order_number", "packed_at"])
+
+        if missing_order_numbers:
+            fallback_rows = orders_df[
+                orders_df["No. Pesanan"].astype(str).str.strip().isin(missing_order_numbers)
+            ]
+            report_rows = pd.concat([report_rows, fallback_rows], ignore_index=True)
 
         st.write(f"**{len(today_order_numbers)} order** sudah di-pack hari ini ({today_str})")
 
