@@ -1057,20 +1057,18 @@ else:
         })[["Order Number", "Username", "Recipient", "Platform", "Shop", "Province", "Shipping", "Variant", "Qty"]]
 
         belum_table_rows = build_belum_table_rows(belum_display_df)
-        st.markdown(
-            f"""
-            {BELUM_DIVERIFIKASI_TABLE_STYLE}
-            <div class="belum-diverifikasi-wrapper">
-            <table class="belum-diverifikasi-table">
-                <tr>
-                    <th>Order Number</th><th>Username</th><th>Recipient</th><th>Platform</th><th>Shop</th><th>Province</th><th>Shipping</th><th>Variant</th><th>Qty</th>
-                </tr>
-                {belum_table_rows}
-            </table>
-            </div>
-            """,
-            unsafe_allow_html=True,
+        # Built as a single unindented string (not an indented triple-quoted
+        # f-string) so Streamlit's markdown parser renders it as HTML rather
+        # than treating the leading indentation as a code block.
+        belum_html = (
+            BELUM_DIVERIFIKASI_TABLE_STYLE
+            + '<div class="belum-diverifikasi-wrapper">'
+            + '<table class="belum-diverifikasi-table">'
+            + '<tr><th>Order Number</th><th>Username</th><th>Recipient</th><th>Platform</th><th>Shop</th><th>Province</th><th>Shipping</th><th>Variant</th><th>Qty</th></tr>'
+            + belum_table_rows
+            + '</table></div>'
         )
+        st.markdown(belum_html, unsafe_allow_html=True)
 
     # ---- Daily packing report (all orders packed today) ----
     st.divider()
