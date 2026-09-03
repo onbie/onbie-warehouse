@@ -957,7 +957,7 @@ else:
             "Jumlah": "Qty",
         })[["Order Number", "Username", "Recipient", "Platform", "Shop", "Province", "Shipping", "Variant", "Qty"]]
 
-        styled_belum_df = style_dashboard_table(belum_display_df)
+        styled_belum_df = belum_display_df
         st.dataframe(
             styled_belum_df,
             use_container_width=True,
@@ -1000,20 +1000,18 @@ else:
             ["No. Pesanan", "Username (Pembeli)", "Nama Penerima", "Platform", "Toko", "Provinsi", "Kota/Kabupaten", "Antar ke counter/ pick-up", "Nama Variasi", "Jumlah"]
         ].copy()
 
-        styled_report_df = style_dashboard_table(
-            report_df.rename(columns={
-                "No. Pesanan": "Order Number",
-                "Username (Pembeli)": "Username",
-                "Nama Penerima": "Recipient",
-                "Platform": "Platform",
-                "Toko": "Shop",
-                "Provinsi": "Province",
-                "Kota/Kabupaten": "Kabupaten/Kota",
-                "Antar ke counter/ pick-up": "Shipping",
-                "Nama Variasi": "Variant",
-                "Jumlah": "Qty"
-            })
-        )
+        styled_report_df = report_df.rename(columns={
+            "No. Pesanan": "Order Number",
+            "Username (Pembeli)": "Username",
+            "Nama Penerima": "Recipient",
+            "Platform": "Platform",
+            "Toko": "Shop",
+            "Provinsi": "Province",
+            "Kota/Kabupaten": "Kabupaten/Kota",
+            "Antar ke counter/ pick-up": "Shipping",
+            "Nama Variasi": "Variant",
+            "Jumlah": "Qty"
+        })
         st.dataframe(
             styled_report_df,
             use_container_width=True,
