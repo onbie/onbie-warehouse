@@ -6,25 +6,44 @@ Shopee OpenAPI v2 OAuth helper for Onbie Packing System.
 Handles:
 - HMAC-SHA256 signature generation (per Shopee v2 spec)
 - Access token exchange via /api/v2/auth/token/get
-- Token persistence to tokens.json
+- Token persistence: Supabase (durable, survives Streamlit Cloud restarts
+  and refresh_token rotation) with tokens.json as a local-development /
+  Supabase-unavailable fallback.
 
-This module has NO dependency on Streamlit and NO knowledge of the
-packing system. It is intentionally kept as a plain Python module so
-it can be tested and reused independently of app.py.
+This module has NO hard dependency on Streamlit — it reads configuration
+from os.environ, not st.secrets, so it can still be tested and reused
+independently of app.py (app.py is what bridges st.secrets → os.environ).
 
 Environment variables required (set on Streamlit Community Cloud):
     SHOPEE_PARTNER_ID    integer partner ID from Shopee Open Platform
     SHOPEE_PARTNER_KEY   secret key string from Shopee Open Platform
+
+Environment variables for persistent Supabase token storage (optional —
+everything falls back to tokens.json if these are unset or Supabase is
+unreachable):
+    SUPABASE_URL         Supabase project URL
+    SUPABASE_KEY         Supabase service role or anon key with access to
+                          the shopee_tokens table
+
+Expected Supabase table (create once, e.g. via the SQL editor):
+    create table shopee_tokens (
+        shop_id       bigint primary key,
+        access_token  text,
+        refresh_token text,
+        expire_in     bigint,
+        fetch_time    bigint,
+        partner_id    bigint
+    );
 """
 
 # =============================================================================
-# DEVELOPMENT ONLY
-# tokens.json digunakan sementara untuk membuktikan OAuth flow berjalan.
-# Production sebaiknya menggunakan database atau secure secret storage
-# (misalnya: Supabase, PostgreSQL, AWS Secrets Manager, atau Streamlit
-# Secrets yang di-read ke memory saja tanpa ditulis ke disk).
-# tokens.json TIDAK persisten di Streamlit Community Cloud — file ini
-# akan hilang setiap kali app di-reboot atau re-deploy.
+# tokens.json is now a FALLBACK only — used for local development, or as a
+# safety net if Supabase is unreachable/unconfigured. The source of truth
+# for persistence across Streamlit Cloud restarts (and across refresh_token
+# rotation, which Shopee does on every refresh) is Supabase: it's the only
+# one of the three options that the running app can actually write to at
+# runtime — tokens.json is wiped on every container restart, and Streamlit
+# Secrets are read-only from inside the app.
 # =============================================================================
 
 import os
@@ -304,11 +323,132 @@ def exchange_code_for_token(code: str, shop_id: int) -> Dict:
 
 
 # ---------------------------------------------------------------------------
+# Supabase persistent token storage
+# ---------------------------------------------------------------------------
+# This is the durable, cross-restart, cross-rotation source of truth. Unlike
+# tokens.json (wiped on every Streamlit Cloud container restart) or
+# Streamlit secrets (read-only from inside the running app — there is no
+# API to write an updated refresh_token back into them), Supabase is an
+# external store the app can both read AND write at runtime. Every token
+# save (OAuth connect, or a refresh picking up a rotated refresh_token)
+# writes here immediately, so the next restart always picks up the current
+# token, not a stale one.
+#
+# Every function below is best-effort and never raises out of this module's
+# public API: if SUPABASE_URL/SUPABASE_KEY aren't set, the `supabase`
+# package isn't installed, or a network/DB error occurs, callers fall back
+# to tokens.json transparently (see load_tokens() / _persist_tokens()).
+
+SUPABASE_TABLE = "shopee_tokens"
+
+_supabase_client = None
+_supabase_client_init_attempted = False
+
+
+def _get_supabase_client():
+    """Lazily create and cache a Supabase client from SUPABASE_URL /
+    SUPABASE_KEY in os.environ. Returns None (never raises) if not
+    configured, the `supabase` package isn't installed, or the client
+    can't be created — every caller must handle a None return."""
+    global _supabase_client, _supabase_client_init_attempted
+    if _supabase_client is not None:
+        return _supabase_client
+    if _supabase_client_init_attempted:
+        return None
+    _supabase_client_init_attempted = True
+
+    url = os.environ.get("SUPABASE_URL", "").strip()
+    key = os.environ.get("SUPABASE_KEY", "").strip()
+    if not url or not key:
+        logger.debug("Supabase not configured (SUPABASE_URL/SUPABASE_KEY unset) — using tokens.json only.")
+        return None
+
+    try:
+        from supabase import create_client
+        _supabase_client = create_client(url, key)
+        return _supabase_client
+    except Exception as e:
+        logger.warning("Supabase client init failed, falling back to tokens.json: %s", e)
+        return None
+
+
+def _supabase_load_tokens() -> Optional[Dict]:
+    """Fetch the most recently updated token row from Supabase. Returns
+    None if Supabase isn't configured/reachable or no row exists yet."""
+    client = _get_supabase_client()
+    if client is None:
+        return None
+    try:
+        result = (
+            client.table(SUPABASE_TABLE)
+            .select("shop_id, access_token, refresh_token, expire_in, fetch_time, partner_id")
+            .order("fetch_time", desc=True)
+            .limit(1)
+            .execute()
+        )
+        rows = result.data or []
+        if not rows:
+            return None
+        return dict(rows[0])
+    except Exception as e:
+        logger.warning("Supabase token load failed, falling back to tokens.json: %s", e)
+        return None
+
+
+def _supabase_save_tokens(tokens: Dict) -> None:
+    """Upsert the current tokens into Supabase, keyed by shop_id. Raises on
+    failure so the caller (_persist_tokens) can log it — but a failure here
+    never prevents the local tokens.json write from succeeding."""
+    client = _get_supabase_client()
+    if client is None:
+        return
+    row = {
+        "shop_id":       tokens.get("shop_id"),
+        "access_token":  tokens.get("access_token"),
+        "refresh_token": tokens.get("refresh_token"),
+        "expire_in":     tokens.get("expire_in"),
+        "fetch_time":    tokens.get("fetch_time"),
+        "partner_id":    tokens.get("partner_id"),
+    }
+    client.table(SUPABASE_TABLE).upsert(row, on_conflict="shop_id").execute()
+
+
+def _persist_tokens(tokens: Dict) -> Dict:
+    """Persist tokens to both stores: tokens.json (always — local dev
+    fallback / safety net) and Supabase (best-effort — the durable,
+    cross-restart source of truth). A Supabase failure is logged but never
+    raised, so OAuth connect / token refresh still succeeds locally even if
+    Supabase is temporarily unreachable."""
+    _write_tokens_file(tokens)
+    try:
+        _supabase_save_tokens(tokens)
+    except Exception as e:
+        logger.warning("Supabase token save failed (tokens.json still updated): %s", e)
+    return tokens
+
+
+# ---------------------------------------------------------------------------
 # Token persistence
 # ---------------------------------------------------------------------------
 
+def _write_tokens_file(tokens: Dict) -> Dict:
+    """Write a tokens dict to TOKENS_FILE as-is. Local-development /
+    Supabase-unavailable fallback — see _persist_tokens(). Also used
+    directly by bootstrap_tokens_from_secrets()'s legacy path.
+    """
+    try:
+        with open(TOKENS_FILE, "w") as f:
+            json.dump(tokens, f, indent=2)
+    except OSError as e:
+        raise RuntimeError(
+            f"Token save failed: could not write to {TOKENS_FILE}. Detail: {e}"
+        )
+    return tokens
+
+
 def save_tokens(data: Dict, shop_id: int) -> Dict:
-    """Extract token fields from Shopee response and persist to tokens.json.
+    """Extract token fields from Shopee response and persist them (Supabase
+    first, tokens.json always as fallback — see _persist_tokens()).
 
     Saved fields match the format required by subsequent Shopee API calls:
         access_token   — bearer token for API calls
@@ -357,33 +497,98 @@ def save_tokens(data: Dict, shop_id: int) -> Dict:
         "partner_id":    partner_id,
     }
 
-    try:
-        if os.path.exists(TOKENS_FILE):
-            logger.warning(
-                "tokens.json already exists — existing token for shop_id=%s "
-                "will be overwritten with new token.", shop_id
-            )
-        with open(TOKENS_FILE, "w") as f:
-            json.dump(tokens, f, indent=2)
-    except OSError as e:
-        raise RuntimeError(
-            f"Token save failed: could not write to {TOKENS_FILE}. Detail: {e}"
+    if os.path.exists(TOKENS_FILE):
+        logger.warning(
+            "tokens.json already exists — existing token for shop_id=%s "
+            "will be overwritten with new token.", shop_id
         )
+    _persist_tokens(tokens)
 
     logger.info(
-        "Tokens saved to %s (expire_in=%ss, fetch_time=%s)",
-        TOKENS_FILE, expire_in, fetch_time,
+        "Tokens saved (expire_in=%ss, fetch_time=%s)",
+        expire_in, fetch_time,
     )
 
     return tokens
 
 
-def load_tokens() -> Optional[Dict]:
-    """Load saved tokens from tokens.json.
+def bootstrap_tokens_from_secrets(
+    shop_id,
+    refresh_token: str,
+    partner_id: Optional[int] = None,
+    access_token: str = "",
+    expire_in: int = 0,
+    fetch_time: int = 0,
+) -> Dict:
+    """Seed tokens.json from a persistent, non-ephemeral source (e.g.
+    Streamlit Cloud secrets) so a fresh container doesn't require the user
+    to click Connect Shopee again after every restart/redeploy.
+
+    Only shop_id and refresh_token are required. access_token/expire_in/
+    fetch_time default to values that make is_token_expired() immediately
+    return True, so the very next get_valid_access_token() call refreshes
+    and obtains a real access_token — exactly the same path an already
+    -expired token takes, no special-casing required elsewhere.
+
+    This function always overwrites tokens.json — callers are responsible
+    for only invoking it when no local tokens.json already exists (see
+    load_tokens() is None), so a live, possibly-rotated refresh_token
+    already on disk from earlier in this container's lifetime is never
+    clobbered by a stale value from secrets.
+
+    Args:
+        shop_id:       integer shop ID.
+        refresh_token: Shopee refresh token, sourced from persistent storage.
+        partner_id:    integer partner ID. If omitted, read from
+                       get_credentials() (i.e. os.environ, same as everywhere
+                       else in this module).
+        access_token, expire_in, fetch_time: optional; defaults force an
+                       immediate refresh on next use.
 
     Returns:
-        Token dict if file exists and is valid JSON, otherwise None.
+        The dict that was written to disk.
+
+    Raises:
+        ValueError:   shop_id or refresh_token missing.
+        RuntimeError: credentials missing, or tokens.json could not be written.
     """
+    if not shop_id:
+        raise ValueError("bootstrap_tokens_from_secrets: shop_id is required.")
+    if not refresh_token:
+        raise ValueError("bootstrap_tokens_from_secrets: refresh_token is required.")
+
+    if partner_id is None:
+        partner_id, _ = get_credentials()
+
+    tokens = {
+        "access_token":  access_token,
+        "refresh_token": refresh_token,
+        "expire_in":     expire_in,
+        "fetch_time":    fetch_time,
+        "shop_id":       int(shop_id),
+        "partner_id":    int(partner_id),
+    }
+
+    logger.info(
+        "Bootstrapping tokens.json from persistent secrets for shop_id=%s "
+        "(no local tokens.json was found).", shop_id,
+    )
+    return _write_tokens_file(tokens)
+
+
+def load_tokens() -> Optional[Dict]:
+    """Load saved tokens. Supabase (if configured and reachable) is checked
+    first — it's the durable, cross-restart, cross-rotation source of
+    truth. Falls back to the local tokens.json file for local development
+    or if Supabase is unreachable/unconfigured.
+
+    Returns:
+        Token dict if found in Supabase or tokens.json, otherwise None.
+    """
+    supabase_tokens = _supabase_load_tokens()
+    if supabase_tokens is not None:
+        return supabase_tokens
+
     if not os.path.exists(TOKENS_FILE):
         logger.debug("tokens.json not found — no saved tokens.")
         return None

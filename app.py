@@ -42,6 +42,64 @@ def _inject_shopee_secrets():
 
 _inject_shopee_secrets()
 
+# ---- Inject Supabase secrets into os.environ ----
+# Same bridge pattern as _inject_shopee_secrets() above. shopee_auth.py's
+# Supabase persistence layer (_get_supabase_client()) reads SUPABASE_URL /
+# SUPABASE_KEY from os.environ, never from st.secrets directly, so it stays
+# Streamlit-free. If these aren't configured, shopee_auth.py's Supabase
+# functions all no-op and the app transparently falls back to tokens.json —
+# nothing else needs to change or check for this.
+def _inject_supabase_secrets():
+    try:
+        supabase_url = str(st.secrets["SUPABASE_URL"]).strip()
+        supabase_key = str(st.secrets["SUPABASE_KEY"]).strip()
+        os.environ["SUPABASE_URL"] = supabase_url
+        os.environ["SUPABASE_KEY"] = supabase_key
+    except KeyError:
+        # Not configured — Shopee connection persistence falls back to
+        # tokens.json (local dev) instead of surviving container restarts.
+        pass
+
+_inject_supabase_secrets()
+
+# ---- Legacy fallback: bootstrap from Streamlit secrets if Supabase is down ----
+# Supabase (see shopee_auth.py) is now the primary persistence layer and
+# handles this automatically: load_tokens() checks Supabase first, and every
+# save_tokens() call (OAuth connect, or a refresh rotating refresh_token)
+# writes there immediately. This function only matters as a secondary
+# safety net — e.g. Supabase is temporarily unreachable AND tokens.json is
+# missing (fresh container) AND a `[shopee_tokens]` secret happens to be
+# configured. It's a no-op whenever tokens.json OR Supabase already has
+# tokens, which is the normal case once Supabase is set up.
+def _bootstrap_shopee_tokens_from_secrets():
+    if _shopee_auth.load_tokens() is not None:
+        return  # Supabase or tokens.json already has tokens — nothing to bootstrap
+
+    try:
+        shopee_secrets = st.secrets["shopee_tokens"]
+        shop_id = shopee_secrets["shop_id"]
+        refresh_token = shopee_secrets["refresh_token"]
+    except KeyError:
+        return  # no persisted tokens configured — normal until first Connect
+
+    try:
+        _shopee_auth.bootstrap_tokens_from_secrets(
+            shop_id=shop_id,
+            refresh_token=refresh_token,
+        )
+        # Force an immediate refresh so the sidebar shows "Terhubung" with a
+        # real access token right away, instead of a stale/expired-looking
+        # state until the first Shopee API call happens to trigger it.
+        _shopee_auth.get_valid_access_token()
+    except Exception:
+        # Best-effort bootstrap only — any failure (bad/rotated refresh
+        # token, network issue, misconfigured secret) just falls back to
+        # the normal "Belum terhubung ke Shopee" sidebar state, same as if
+        # tokens.json had never existed.
+        pass
+
+_bootstrap_shopee_tokens_from_secrets()
+
 def _handle_shopee_oauth():
     params = st.query_params
     code = params.get("code", "")
@@ -197,6 +255,23 @@ with st.sidebar:
                 "fetch_time":    _tokens.get("fetch_time"),
                 "shop_id":       _tokens.get("shop_id"),
             })
+
+        # Shopee rotates refresh_token on each refresh. tokens.json always
+        # has the current one, but Streamlit secrets can only be updated
+        # manually (an app can't write to its own Secrets at runtime), so
+        # flag it here when they've drifted apart — otherwise the NEXT
+        # container restart would bootstrap from the now-stale secret value
+        # and fail, silently landing back on "Belum terhubung ke Shopee".
+        try:
+            _secret_refresh_token = st.secrets["shopee_tokens"]["refresh_token"]
+            if _secret_refresh_token and _secret_refresh_token != _tokens.get("refresh_token"):
+                st.info(
+                    "🔁 Refresh token sudah berubah sejak terakhir di-set di Secrets. "
+                    "Update nilai `refresh_token` di Streamlit Cloud → Settings → Secrets "
+                    "(lihat Token Details di atas) supaya koneksi tetap bertahan setelah restart berikutnya."
+                )
+        except KeyError:
+            pass  # no [shopee_tokens] secret configured — nothing to compare
 
         if st.button("🔄 Reconnect Shopee", key="btn_reconnect_shopee"):
             try:
