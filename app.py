@@ -3,6 +3,7 @@ import pandas as pd
 import os
 import streamlit.components.v1 as components
 from datetime import datetime
+from zoneinfo import ZoneInfo
 
 st.set_page_config(page_title="Shopee Packing Checker", layout="wide")
 st.title("📦 Shopee Packing Checker")
@@ -581,9 +582,10 @@ with st.sidebar:
 
         _last_sync_ts = st.session_state.get("_last_shopee_sync_ts")
         if _last_sync_ts:
+            _last_sync_wib = datetime.fromtimestamp(_last_sync_ts, tz=ZoneInfo("Asia/Jakarta"))
             st.caption(
                 "Last sync: "
-                + datetime.fromtimestamp(_last_sync_ts).strftime("%Y-%m-%d %H:%M:%S")
+                + _last_sync_wib.strftime("%Y-%m-%d %H:%M:%S") + " WIB"
             )
         else:
             st.caption("Last sync: belum pernah")
