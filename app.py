@@ -3,6 +3,10 @@ import pandas as pd
 import os
 import streamlit.components.v1 as components
 from datetime import datetime
+import logging
+import socket
+from urllib.parse import urlparse
+import requests
 
 st.set_page_config(page_title="Shopee Packing Checker", layout="wide")
 st.title("📦 Shopee Packing Checker")
@@ -61,6 +65,39 @@ def _inject_supabase_secrets():
         pass
 
 _inject_supabase_secrets()
+
+# ---- TEMPORARY: Supabase connectivity diagnostic ----------------------
+# Remove once the Supabase connection issue is confirmed resolved. Logs
+# only the sanitized hostname, DNS result, and HTTP status/error type —
+# never SUPABASE_KEY or any token value.
+_logger = logging.getLogger(__name__)
+
+
+def _diagnose_supabase_connectivity():
+    supabase_url = os.environ.get("SUPABASE_URL", "").strip()
+    if not supabase_url:
+        _logger.info("[supabase-diag] SUPABASE_URL not set — skipping diagnostic.")
+        return
+
+    hostname = urlparse(supabase_url).hostname or "(unparseable)"
+    _logger.info("[supabase-diag] SUPABASE_URL hostname: %s", hostname)
+
+    try:
+        ip = socket.gethostbyname(hostname)
+        _logger.info("[supabase-diag] DNS resolution OK: %s -> %s", hostname, ip)
+    except Exception as e:
+        _logger.warning("[supabase-diag] DNS resolution FAILED for %s: %s: %s", hostname, type(e).__name__, e)
+        return
+
+    try:
+        resp = requests.get(f"{supabase_url}/rest/v1/", timeout=10)
+        _logger.info("[supabase-diag] HTTPS GET %s/rest/v1/ -> status %s", supabase_url, resp.status_code)
+    except Exception as e:
+        _logger.warning("[supabase-diag] HTTPS GET to %s/rest/v1/ FAILED: %s: %s", supabase_url, type(e).__name__, e)
+
+
+_diagnose_supabase_connectivity()
+# ---- END TEMPORARY diagnostic ------------------------------------------
 
 # ---- Legacy fallback: bootstrap from Streamlit secrets if Supabase is down ----
 # Supabase (see shopee_auth.py) is now the primary persistence layer and
