@@ -225,11 +225,113 @@ def adapt_shopee_api_to_df(orders_with_detail):
     return pd.DataFrame(rows, columns=_COLS) if rows else pd.DataFrame(columns=_COLS)
 
 
+# ---- Automatic Shopee order sync (every 5 minutes while the app is open) ----
+# _sync_shopee_orders_now() is the single sync implementation — both the
+# manual "Sync Now" button below and the automatic timer call this same
+# function, so there's only ever one place that talks to the Shopee API for
+# this purpose (no duplicated fetch/dedup logic).
+SHOPEE_AUTO_SYNC_INTERVAL_SECONDS = 5 * 60
+
+
+def _sync_shopee_orders_now():
+    """Fetch READY_TO_SHIP + PROCESSED orders from Shopee, dedupe by
+    order_sn (keep first occurrence), and refresh the packing queue —
+    identical behavior to the original manual sync. Updates
+    st.session_state["shopee_orders_df"], writes SHOPEE_DATA_FILE, clears
+    the orders_master.csv cache, and records the sync timestamp/outcome in
+    st.session_state so the sidebar can display it.
+
+    Returns (success: bool, message: str).
+    """
+    import shopee_api as _shopee_api_sync
+    import time as _time_sync
+
+    _time_to_sync   = int(_time_sync.time())
+    _time_from_sync = _time_to_sync - 7 * 86400  # last 7 days
+
+    try:
+        _raw_rts = _shopee_api_sync.get_orders_with_detail(
+            time_from=_time_from_sync,
+            time_to=_time_to_sync,
+            time_range_field="create_time",
+            order_status="READY_TO_SHIP",
+            detail_optional_fields=["item_list", "buyer_username", "recipient_address"],
+        )
+        _raw_proc = _shopee_api_sync.get_orders_with_detail(
+            time_from=_time_from_sync,
+            time_to=_time_to_sync,
+            time_range_field="create_time",
+            order_status="PROCESSED",
+            detail_optional_fields=["item_list", "buyer_username", "recipient_address"],
+        )
+        # Deduplicate by order_sn — keep first occurrence
+        _seen = set()
+        _raw_orders = []
+        for _o in (_raw_rts + _raw_proc):
+            _sn = _o.get("order_sn", "")
+            if _sn not in _seen:
+                _seen.add(_sn)
+                _raw_orders.append(_o)
+        _synced_df = adapt_shopee_api_to_df(_raw_orders)
+        os.makedirs("data", exist_ok=True)
+        _synced_df.to_csv(SHOPEE_DATA_FILE, index=False)
+        st.session_state["shopee_orders_df"] = _synced_df
+        st.cache_data.clear()
+        _n = _synced_df["No. Pesanan"].nunique()
+        st.session_state["_last_shopee_sync_ts"] = _time_sync.time()
+        st.session_state["_last_shopee_sync_error"] = None
+        return True, f"✅ {_n} order READY_TO_SHIP di-load ke packing queue"
+    except RuntimeError as _e:
+        _msg = f"❌ Shopee API error: {_e}"
+        st.session_state["_last_shopee_sync_error"] = _msg
+        return False, _msg
+    except ValueError as _e:
+        _msg = f"❌ Parameter error: {_e}"
+        st.session_state["_last_shopee_sync_error"] = _msg
+        return False, _msg
+    except Exception as _e:
+        _msg = f"❌ Error: {_e}"
+        st.session_state["_last_shopee_sync_error"] = _msg
+        return False, _msg
+
+
+def _maybe_auto_sync_shopee_orders():
+    """Run _sync_shopee_orders_now() only if Shopee is connected AND at
+    least SHOPEE_AUTO_SYNC_INTERVAL_SECONDS have passed since the last
+    successful sync. This, plus the fragment's own run_every timer below,
+    is what prevents duplicate API calls on every normal Streamlit rerun —
+    a plain page interaction in between auto-sync ticks does not re-trigger
+    a Shopee API call."""
+    if _shopee_auth.load_tokens() is None:
+        return  # not connected — nothing to sync
+
+    import time as _time_check
+    _last_sync_ts = st.session_state.get("_last_shopee_sync_ts", 0)
+    if _time_check.time() - _last_sync_ts < SHOPEE_AUTO_SYNC_INTERVAL_SECONDS:
+        return  # interval not elapsed yet
+
+    _sync_shopee_orders_now()
+
+
+@st.fragment(run_every=SHOPEE_AUTO_SYNC_INTERVAL_SECONDS)
+def _shopee_auto_sync_fragment():
+    """A st.fragment with run_every re-executes on its own timer while the
+    browser tab stays open, independent of whether the user interacts with
+    the app — this is what makes syncing "automatic" without a separate
+    worker/service or hand-rolled JS polling. Renders nothing; it only
+    performs the (rate-limited) sync check above."""
+    _maybe_auto_sync_shopee_orders()
+
+
 # ---- Shopee Integration sidebar ----
 # Entirely in the sidebar so it never interferes with the packing UI layout.
 # The packing checker works normally regardless of Shopee connection status.
 with st.sidebar:
     st.header("🟠 Shopee Integration")
+
+    # Registers the run_every fragment so the 5-minute auto-sync timer
+    # keeps ticking on every render of this sidebar (i.e. always).
+    _shopee_auto_sync_fragment()
 
     _tokens = _shopee_auth.load_tokens()
 
@@ -477,50 +579,23 @@ with st.sidebar:
             _n_synced = st.session_state["shopee_orders_df"]["No. Pesanan"].nunique()
             st.success(f"✅ Packing queue: {_n_synced} order dari Shopee")
 
-        if st.button("🔄 Sync Orders dari Shopee", key="btn_sync_shopee_orders"):
-            import shopee_api as _shopee_api_sync
-            import time as _time_sync
+        _last_sync_ts = st.session_state.get("_last_shopee_sync_ts")
+        if _last_sync_ts:
+            st.caption(
+                "Last sync: "
+                + datetime.fromtimestamp(_last_sync_ts).strftime("%Y-%m-%d %H:%M:%S")
+            )
+        else:
+            st.caption("Last sync: belum pernah")
+        st.caption(f"Auto-sync setiap {SHOPEE_AUTO_SYNC_INTERVAL_SECONDS // 60} menit selama app terbuka.")
 
-            _time_to_sync   = int(_time_sync.time())
-            _time_from_sync = _time_to_sync - 7 * 86400  # last 7 days
-
+        if st.button("🔄 Sync Now", key="btn_sync_shopee_orders"):
             with st.spinner("Fetching READY_TO_SHIP orders..."):
-                try:
-                    _raw_rts = _shopee_api_sync.get_orders_with_detail(
-                        time_from=_time_from_sync,
-                        time_to=_time_to_sync,
-                        time_range_field="create_time",
-                        order_status="READY_TO_SHIP",
-                        detail_optional_fields=["item_list", "buyer_username", "recipient_address"],
-                    )
-                    _raw_proc = _shopee_api_sync.get_orders_with_detail(
-                        time_from=_time_from_sync,
-                        time_to=_time_to_sync,
-                        time_range_field="create_time",
-                        order_status="PROCESSED",
-                        detail_optional_fields=["item_list", "buyer_username", "recipient_address"],
-                    )
-                    # Deduplicate by order_sn — keep first occurrence
-                    _seen = set()
-                    _raw_orders = []
-                    for _o in (_raw_rts + _raw_proc):
-                        _sn = _o.get("order_sn", "")
-                        if _sn not in _seen:
-                            _seen.add(_sn)
-                            _raw_orders.append(_o)
-                    _synced_df = adapt_shopee_api_to_df(_raw_orders)
-                    os.makedirs("data", exist_ok=True)
-                    _synced_df.to_csv(SHOPEE_DATA_FILE, index=False)
-                    st.session_state["shopee_orders_df"] = _synced_df
-                    _n = _synced_df["No. Pesanan"].nunique()
-                    st.success(f"✅ {_n} order READY_TO_SHIP di-load ke packing queue")
-                    st.cache_data.clear()
-                except RuntimeError as _e:
-                    st.error(f"❌ Shopee API error: {_e}")
-                except ValueError as _e:
-                    st.error(f"❌ Parameter error: {_e}")
-                except Exception as _e:
-                    st.error(f"❌ Error: {_e}")
+                _success, _message = _sync_shopee_orders_now()
+                if _success:
+                    st.success(_message)
+                else:
+                    st.error(_message)
         # ----------------------------------------------------------------
         # END Phase 1
         # ----------------------------------------------------------------
