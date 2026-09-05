@@ -148,9 +148,11 @@ def adapt_shopee_api_to_df(orders_with_detail):
     the column shape the existing packing UI expects (same as orders_master.csv).
 
     One row per product item — mirrors the EasyBoss multi-row structure.
-    Only confirmed-working Shopee API fields are mapped. Unconfirmed fields
-    (recipient address, tracking number, buyer username) are left as empty
-    strings and will be added in a later phase once verified.
+    Only confirmed-working Shopee API fields are mapped. recipient_address
+    and buyer_username are confirmed and mapped below. note,
+    shipping_carrier, and package_list (tracking_number) were added next
+    and are also mapped below; any other optional field not yet requested
+    in detail_optional_fields is left as an empty string.
 
     Status mapping (Shopee API → internal packing status):
         READY_TO_SHIP → "Perlu Dikirim"   (packable)
@@ -184,20 +186,40 @@ def adapt_shopee_api_to_df(orders_with_detail):
         item_list  = order.get("item_list") or []
 
         # Order-level fields — confirmed working optional fields only
-        buyer_username = str(order.get("buyer_username", "") or "")
-        recipient      = order.get("recipient_address") or {}
-        nama_penerima  = str(recipient.get("name", "") or "")
-        kota           = str(recipient.get("city", "") or "")
-        provinsi       = str(recipient.get("state", "") or "")
+        buyer_username   = str(order.get("buyer_username", "") or "")
+        recipient        = order.get("recipient_address") or {}
+        nama_penerima    = str(recipient.get("name", "") or "")
+        kota             = str(recipient.get("city", "") or "")
+        provinsi         = str(recipient.get("state", "") or "")
+        catatan_pembeli  = str(order.get("note", "") or "")
+        metode_kirim     = str(order.get("shipping_carrier", "") or "")
+
+        # Tracking number lives per-package (an order can be split into
+        # multiple packages/tracking numbers). We only have one "No. Resi"
+        # field, so take the first non-empty tracking_number and never
+        # concatenate — never invent a value if none is present yet.
+        no_resi = ""
+        package_list = order.get("package_list")
+        if isinstance(package_list, list):
+            for pkg in package_list:
+                if not isinstance(pkg, dict):
+                    continue
+                tracking = str(pkg.get("tracking_number", "") or "").strip()
+                if tracking:
+                    no_resi = tracking
+                    break
 
         if not item_list:
             rows.append({c: "" for c in _COLS})
             rows[-1].update({
                 "No. Pesanan":       order_sn,
+                "No. Resi":          no_resi,
                 "Username (Pembeli)": buyer_username,
                 "Nama Penerima":     nama_penerima,
                 "Kota/Kabupaten":    kota,
                 "Provinsi":          provinsi,
+                "Antar ke counter/ pick-up": metode_kirim,
+                "Catatan dari Pembeli": catatan_pembeli,
                 "Status Pesanan":    status,
                 "Platform":          "Shopee",
                 "Sumber":            "Shopee API",
@@ -208,10 +230,13 @@ def adapt_shopee_api_to_df(orders_with_detail):
                 row = {c: "" for c in _COLS}
                 row.update({
                     "No. Pesanan":       order_sn,
+                    "No. Resi":          no_resi,
                     "Username (Pembeli)": buyer_username,
                     "Nama Penerima":     nama_penerima,
                     "Kota/Kabupaten":    kota,
                     "Provinsi":          provinsi,
+                    "Antar ke counter/ pick-up": metode_kirim,
+                    "Catatan dari Pembeli": catatan_pembeli,
                     "SKU Induk":         str(item.get("item_sku", "") or ""),
                     "Nama Produk":       str(item.get("item_name", "") or ""),
                     "Nama Barang":       str(item.get("item_name", "") or ""),
@@ -256,14 +281,14 @@ def _sync_shopee_orders_now():
             time_to=_time_to_sync,
             time_range_field="create_time",
             order_status="READY_TO_SHIP",
-            detail_optional_fields=["item_list", "buyer_username", "recipient_address"],
+            detail_optional_fields=["item_list", "buyer_username", "recipient_address", "note", "shipping_carrier", "package_list"],
         )
         _raw_proc = _shopee_api_sync.get_orders_with_detail(
             time_from=_time_from_sync,
             time_to=_time_to_sync,
             time_range_field="create_time",
             order_status="PROCESSED",
-            detail_optional_fields=["item_list", "buyer_username", "recipient_address"],
+            detail_optional_fields=["item_list", "buyer_username", "recipient_address", "note", "shipping_carrier", "package_list"],
         )
         # Deduplicate by order_sn — keep first occurrence
         _seen = set()
