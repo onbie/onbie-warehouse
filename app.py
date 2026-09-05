@@ -504,7 +504,7 @@ with st.sidebar:
                     st.error(_message)
 
         # ----------------------------------------------------------------
-        # TEMP DEBUG — raw Shopee response inspection for order 2609057JFRM0M3
+        # TEMP DEBUG — raw Shopee response inspection for order 2609058WM1KR7F
         # Reads st.session_state["_debug_raw_shopee_orders"], the raw
         # per-order dicts already fetched by the most recent sync above.
         # Makes NO additional Shopee API call. Does not change any existing
@@ -513,7 +513,7 @@ with st.sidebar:
         # _debug_raw_shopee_orders in _sync_shopee_orders_now()) once the
         # empty-field investigation is done.
         # ----------------------------------------------------------------
-        _DEBUG_ORDER_SN = "2609057JFRM0M3"
+        _DEBUG_ORDER_SN = "2609058WM1KR7F"
 
         def _debug_sanitize_recipient_address(addr):
             """Redact phone and full-address fields; never touches tokens/secrets."""
