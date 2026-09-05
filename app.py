@@ -302,6 +302,13 @@ def _sync_shopee_orders_now():
         os.makedirs("data", exist_ok=True)
         _synced_df.to_csv(SHOPEE_DATA_FILE, index=False)
         st.session_state["shopee_orders_df"] = _synced_df
+        # TEMP DEBUG: retain the raw (unflattened) per-order dicts from this
+        # sync so the debug panel below can inspect a specific order's raw
+        # fields without making a second Shopee API call. Does not change
+        # anything about the sync's actual behavior/output — packing queue,
+        # dedup, and df construction above are unaffected. Remove this line
+        # together with the debug panel once the investigation is done.
+        st.session_state["_debug_raw_shopee_orders"] = _raw_orders
         st.cache_data.clear()
         _n = _synced_df["No. Pesanan"].nunique()
         st.session_state["_last_shopee_sync_ts"] = _time_sync.time()
@@ -495,6 +502,58 @@ with st.sidebar:
                     st.success(_message)
                 else:
                     st.error(_message)
+
+        # ----------------------------------------------------------------
+        # TEMP DEBUG — raw Shopee response inspection for order 2609057JFRM0M3
+        # Reads st.session_state["_debug_raw_shopee_orders"], the raw
+        # per-order dicts already fetched by the most recent sync above.
+        # Makes NO additional Shopee API call. Does not change any existing
+        # mapping/behavior — purely additive read-only display. Remove this
+        # entire block (and the one line that populates
+        # _debug_raw_shopee_orders in _sync_shopee_orders_now()) once the
+        # empty-field investigation is done.
+        # ----------------------------------------------------------------
+        _DEBUG_ORDER_SN = "2609057JFRM0M3"
+
+        def _debug_sanitize_recipient_address(addr):
+            """Redact phone and full-address fields; never touches tokens/secrets."""
+            if not isinstance(addr, dict):
+                return {"_type": type(addr).__name__}
+            _redact_full = {"full_address", "address", "town", "district", "zipcode", "region"}
+            out = {}
+            for k, v in addr.items():
+                if k == "phone":
+                    out[k] = "<redacted-phone>" if v else v
+                elif k in _redact_full:
+                    out[k] = f"<redacted, present={bool(v)}>"
+                else:
+                    out[k] = v
+            return out
+
+        _debug_raw_orders = st.session_state.get("_debug_raw_shopee_orders", [])
+        _debug_order = next(
+            (o for o in _debug_raw_orders if o.get("order_sn") == _DEBUG_ORDER_SN), None
+        )
+        with st.expander(f"🐛 TEMP DEBUG: order {_DEBUG_ORDER_SN}"):
+            if _debug_order is None:
+                st.caption(
+                    "Not found in the last sync's in-memory data (no API call "
+                    "made here). Click 🔄 Sync Now above — if this order is "
+                    "within the last 7 days and READY_TO_SHIP/PROCESSED, it will "
+                    "appear here after that sync completes."
+                )
+            else:
+                st.json({
+                    "recipient_address": _debug_sanitize_recipient_address(_debug_order.get("recipient_address")),
+                    "package_list": _debug_order.get("package_list", "(key not present in response)"),
+                    "note": _debug_order.get("note", "(key not present in response)"),
+                    "message_to_seller": _debug_order.get("message_to_seller", "(key not present in response)"),
+                    "shipping_carrier": _debug_order.get("shipping_carrier", "(key not present in response)"),
+                })
+        # ----------------------------------------------------------------
+        # END TEMP DEBUG
+        # ----------------------------------------------------------------
+
         # ----------------------------------------------------------------
         # END Phase 1
         # ----------------------------------------------------------------
