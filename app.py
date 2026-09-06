@@ -719,16 +719,26 @@ def _safe_cell(val):
 
 
 def render_rowspan_table(df, group_col, merge_cols, other_cols):
-    """Render a DataFrame as a plain HTML table where merge_cols are
-    visually merged vertically (rowspan) across consecutive rows sharing
-    the same group_col value, while other_cols always get their own cell
-    on every row. Used where order-level info (recipient, shop, etc.)
-    legitimately repeats across multiple variant rows of the same order —
-    st.dataframe() has no rowspan support, so this builds a real <table>
-    instead. Built as a single flat string (no indented multi-line
-    f-string) so Streamlit's markdown parser renders it as HTML rather
-    than a code block.
+    """Render a DataFrame as an HTML table where merge_cols are visually
+    merged vertically (rowspan) across consecutive rows sharing the same
+    group_col value, while other_cols always get their own cell on every
+    row. Used where order-level info (recipient, shop, etc.) legitimately
+    repeats across multiple variant rows of the same order — st.dataframe()
+    has no rowspan support, so this builds a real <table> instead.
+
+    Styling below reproduces "Order Belum Diverifikasi" / "Laporan Packing
+    Hari Ini" as they actually rendered via st.dataframe() (dark
+    background, subtle borders, rounded outer corners, left-aligned text /
+    right-aligned Qty, compact rows) — verified against a real screenshot
+    earlier, not the (unused-by-st.dataframe) style_dashboard_table()
+    Styler CSS. Column widths are left to natural browser sizing, same as
+    before — no forced widths.
+
+    Built as a single flat string (no indented multi-line f-string) so
+    Streamlit's markdown parser renders it as HTML rather than a code
+    block.
     """
+    qty_cols = {"Qty", "Jumlah"}
     header_html = "".join(f"<th>{col}</th>" for col in merge_cols + other_cols)
     body_rows = []
     for _, group in df.groupby(group_col, sort=False):
@@ -739,26 +749,33 @@ def render_rowspan_table(df, group_col, merge_cols, other_cols):
                 for col in merge_cols:
                     cells.append(f'<td rowspan="{n}">{_safe_cell(r.get(col))}</td>')
             for col in other_cols:
-                cells.append(f"<td>{_safe_cell(r.get(col))}</td>")
+                cls = ' class="rowspan-order-qty-cell"' if col in qty_cols else ""
+                cells.append(f"<td{cls}>{_safe_cell(r.get(col))}</td>")
             body_rows.append("<tr>" + "".join(cells) + "</tr>")
     body_html = "".join(body_rows)
 
     style_html = (
         "<style>"
-        ".rowspan-order-table{border-collapse:collapse;width:100%;font-size:14px;}"
-        ".rowspan-order-table th,.rowspan-order-table td{"
-        "border:1px solid rgba(128,128,128,0.4);padding:8px 12px;"
-        "text-align:left;vertical-align:middle;}"
-        ".rowspan-order-table th{font-weight:600;}"
+        ".rowspan-order-wrapper{border:1px solid rgba(250,250,250,0.2);"
+        "border-radius:8px;overflow:hidden;width:100%;}"
+        ".rowspan-order-table{border-collapse:collapse;width:100%;"
+        "background-color:#0e1117;color:#fafafa;font-size:14px;}"
+        ".rowspan-order-table th{background-color:#262730;color:#fafafa;"
+        "font-weight:600;text-align:left;padding:8px 14px;"
+        "border:1px solid rgba(250,250,250,0.2);}"
+        ".rowspan-order-table td{text-align:left;vertical-align:middle;"
+        "padding:8px 14px;border:1px solid rgba(250,250,250,0.2);}"
+        ".rowspan-order-table td.rowspan-order-qty-cell{text-align:right;}"
         "</style>"
     )
     return (
         style_html
+        + '<div class="rowspan-order-wrapper">'
         + '<table class="rowspan-order-table"><tr>'
         + header_html
         + "</tr>"
         + body_html
-        + "</table>"
+        + "</table></div>"
     )
 
 
