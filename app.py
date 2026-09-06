@@ -886,8 +886,8 @@ else:
                         st.write(f"**Username:** {results.iloc[0].get('Username (Pembeli)', '-')}")
                         st.write(f"**Nama Penerima:** {results.iloc[0].get('Nama Penerima', '-')}")
                     with d2:
-                        st.write(f"**Kota:** {results.iloc[0].get('Kota/Kabupaten', '-')}")
-                        st.write(f"**Provinsi:** {results.iloc[0].get('Provinsi', '-')}")
+                        st.write(f"**Shop:** {results.iloc[0].get('Toko', '-')}")
+                        st.write(f"**Kabupaten/Kota:** {results.iloc[0].get('Kota/Kabupaten', '-')}")
                         st.write(f"**Metode Kirim:** {results.iloc[0].get('Antar ke counter/ pick-up', '-')}")
                         st.write(f"**Catatan Pembeli:** {results.iloc[0].get('Catatan dari Pembeli', '-')}")
 
@@ -901,7 +901,7 @@ else:
                         <td>{row.get('Nama Penerima', '-')}</td>
                         <td>{row.get('Platform', '-')}</td>
                         <td>{row.get('Toko', '-')}</td>
-                        <td>{row.get('Provinsi', '-')}</td>
+                        <td>{row.get('Kota/Kabupaten', '-')}</td>
                         <td>{row.get('Antar ke counter/ pick-up', '-')}</td>
                         <td>{p.get('Nama Variasi', '-')}</td>
                         <td>{int(p.get('Jumlah', 0)) if pd.notna(p.get('Jumlah')) else 0}</td>
@@ -925,7 +925,7 @@ else:
                 <body onload="window.print()">
                     <h1>📦 Packing Slip</h1>
                     <table>
-                        <tr><th>No. Pesanan</th><th>Username</th><th>Nama Penerima</th><th>Platform</th><th>Toko</th><th>Provinsi</th><th>Nama Logistik</th><th>Variasi</th><th>Qty</th></tr>
+                        <tr><th>No. Pesanan</th><th>Username</th><th>Nama Penerima</th><th>Platform</th><th>Toko</th><th>Kota/Kabupaten</th><th>Nama Logistik</th><th>Variasi</th><th>Qty</th></tr>
                         {product_rows_html}
                     </table>
                     <p style="margin-top:24px;font-size:12px;color:#888;">Dicetak: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</p>
@@ -1001,11 +1001,11 @@ else:
             "Nama Penerima": "Recipient",
             "Platform": "Platform",
             "Toko": "Shop",
-            "Provinsi": "Province",
+            "Kota/Kabupaten": "Kabupaten/Kota",
             "Antar ke counter/ pick-up": "Shipping",
             "Nama Variasi": "Variant",
             "Jumlah": "Qty",
-        })[["Order Number", "Username", "Recipient", "Platform", "Shop", "Province", "Shipping", "Variant", "Qty"]]
+        })[["Order Number", "Username", "Recipient", "Platform", "Shop", "Kabupaten/Kota", "Shipping", "Variant", "Qty"]]
 
         styled_belum_df = belum_display_df
         st.dataframe(
@@ -1047,7 +1047,7 @@ else:
         st.write(f"**{len(today_order_numbers)} order** sudah di-pack hari ini ({today_str})")
 
         report_df = report_rows[
-            ["No. Pesanan", "Username (Pembeli)", "Nama Penerima", "Platform", "Toko", "Provinsi", "Kota/Kabupaten", "Antar ke counter/ pick-up", "Nama Variasi", "Jumlah"]
+            ["No. Pesanan", "Username (Pembeli)", "Nama Penerima", "Platform", "Toko", "Kota/Kabupaten", "Antar ke counter/ pick-up", "Nama Variasi", "Jumlah"]
         ].copy()
 
         styled_report_df = report_df.rename(columns={
@@ -1056,7 +1056,6 @@ else:
             "Nama Penerima": "Recipient",
             "Platform": "Platform",
             "Toko": "Shop",
-            "Provinsi": "Province",
             "Kota/Kabupaten": "Kabupaten/Kota",
             "Antar ke counter/ pick-up": "Shipping",
             "Nama Variasi": "Variant",
@@ -1077,7 +1076,6 @@ else:
                 <td>{r.get('Nama Penerima','-')}</td>
                 <td>{r.get('Platform','-')}</td>
                 <td>{r.get('Toko','-')}</td>
-                <td>{r.get('Provinsi','-')}</td>
                 <td>{r.get('Kota/Kabupaten','-')}</td>
                 <td>{r.get('Antar ke counter/ pick-up','-')}</td>
                 <td>{r.get('Nama Variasi','-')}</td>
@@ -1111,7 +1109,7 @@ else:
             <p class="summary"><b>Di-pack hari ini: {len(today_order_numbers)} order</b></p>
             <table>
                 <tr>
-                    <th>No. Pesanan</th><th>Username</th><th>Nama Penerima</th><th>Platform</th><th>Toko</th><th>Provinsi</th><th>Kabupaten/Kota</th><th>Nama Logistik</th><th>Variasi</th><th>Qty</th>
+                    <th>No. Pesanan</th><th>Username</th><th>Nama Penerima</th><th>Platform</th><th>Toko</th><th>Kabupaten/Kota</th><th>Nama Logistik</th><th>Variasi</th><th>Qty</th>
                 </tr>
                 {report_table_rows}
             </table>
