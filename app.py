@@ -704,6 +704,64 @@ def style_dashboard_table(df, wrap_columns=None):
     return styler
 
 
+def _safe_cell(val):
+    """Render a table cell value safely: pandas/numpy NaN, None, or blank
+    strings all fall back to '-' instead of literal 'nan' text."""
+    if val is None:
+        return "-"
+    try:
+        if pd.isna(val):
+            return "-"
+    except (TypeError, ValueError):
+        pass
+    s = str(val).strip()
+    return s if s and s.lower() != "nan" else "-"
+
+
+def render_rowspan_table(df, group_col, merge_cols, other_cols):
+    """Render a DataFrame as a plain HTML table where merge_cols are
+    visually merged vertically (rowspan) across consecutive rows sharing
+    the same group_col value, while other_cols always get their own cell
+    on every row. Used where order-level info (recipient, shop, etc.)
+    legitimately repeats across multiple variant rows of the same order —
+    st.dataframe() has no rowspan support, so this builds a real <table>
+    instead. Built as a single flat string (no indented multi-line
+    f-string) so Streamlit's markdown parser renders it as HTML rather
+    than a code block.
+    """
+    header_html = "".join(f"<th>{col}</th>" for col in merge_cols + other_cols)
+    body_rows = []
+    for _, group in df.groupby(group_col, sort=False):
+        n = len(group)
+        for i, (_, r) in enumerate(group.iterrows()):
+            cells = []
+            if i == 0:
+                for col in merge_cols:
+                    cells.append(f'<td rowspan="{n}">{_safe_cell(r.get(col))}</td>')
+            for col in other_cols:
+                cells.append(f"<td>{_safe_cell(r.get(col))}</td>")
+            body_rows.append("<tr>" + "".join(cells) + "</tr>")
+    body_html = "".join(body_rows)
+
+    style_html = (
+        "<style>"
+        ".rowspan-order-table{border-collapse:collapse;width:100%;font-size:14px;}"
+        ".rowspan-order-table th,.rowspan-order-table td{"
+        "border:1px solid rgba(128,128,128,0.4);padding:8px 12px;"
+        "text-align:left;vertical-align:middle;}"
+        ".rowspan-order-table th{font-weight:600;}"
+        "</style>"
+    )
+    return (
+        style_html
+        + '<table class="rowspan-order-table"><tr>'
+        + header_html
+        + "</tr>"
+        + body_html
+        + "</table>"
+    )
+
+
 def focus_search_box():
     components.html(
         """
@@ -1019,12 +1077,13 @@ else:
             "Jumlah": "Qty",
         })[["Order Number", "Username", "Recipient", "Platform", "Shop", "Kabupaten/Kota", "Shipping", "Variant", "Qty"]]
 
-        styled_belum_df = belum_display_df
-        st.dataframe(
-            styled_belum_df,
-            use_container_width=True,
-            hide_index=True,
+        belum_table_html = render_rowspan_table(
+            belum_display_df,
+            group_col="Order Number",
+            merge_cols=["Order Number", "Username", "Recipient", "Platform", "Shop", "Kabupaten/Kota", "Shipping"],
+            other_cols=["Variant", "Qty"],
         )
+        st.markdown(belum_table_html, unsafe_allow_html=True)
 
     # ---- Daily packing report (all orders packed today) ----
     st.divider()
@@ -1073,11 +1132,13 @@ else:
             "Nama Variasi": "Variant",
             "Jumlah": "Qty"
         })
-        st.dataframe(
+        daily_report_table_html = render_rowspan_table(
             styled_report_df,
-            use_container_width=True,
-            hide_index=True,
+            group_col="Order Number",
+            merge_cols=["Order Number", "Username", "Recipient", "Platform", "Shop", "Kabupaten/Kota", "Shipping"],
+            other_cols=["Variant", "Qty"],
         )
+        st.markdown(daily_report_table_html, unsafe_allow_html=True)
 
         # Build printable daily report HTML
         report_table_rows = "".join(
