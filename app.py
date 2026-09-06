@@ -497,37 +497,6 @@ with st.sidebar:
                     st.error(_message)
 
         # ----------------------------------------------------------------
-        # TEMPORARY — test get_tracking_number(), remove after endpoint is
-        # verified. Uses the first order already in the current Shopee
-        # packing queue (st.session_state["shopee_orders_df"]) — no extra
-        # get_order_list() call. Displays only a fixed set of safe fields;
-        # never the raw response, recipient info, tokens, or secrets.
-        # ----------------------------------------------------------------
-        if st.button("🧪 Test get_tracking_number", key="btn_test_get_tracking_number"):
-            _orders_df_for_test = st.session_state.get("shopee_orders_df")
-            if _orders_df_for_test is None or _orders_df_for_test.empty:
-                st.warning("Belum ada order Shopee di packing queue. Klik Sync Now dulu.")
-            else:
-                _test_order_sn = str(_orders_df_for_test.iloc[0]["No. Pesanan"]).strip()
-                st.caption(f"Testing order_sn: {_test_order_sn}")
-                try:
-                    import shopee_api as _shopee_api_test
-                    _tracking_resp = _shopee_api_test.get_tracking_number(order_sn=_test_order_sn)
-                    st.json({
-                        "tracking_number":            _tracking_resp.get("tracking_number", "(not present)"),
-                        "plp_number":                 _tracking_resp.get("plp_number", "(not present)"),
-                        "first_mile_tracking_number": _tracking_resp.get("first_mile_tracking_number", "(not present)"),
-                        "last_mile_tracking_number":  _tracking_resp.get("last_mile_tracking_number", "(not present)"),
-                        "hint":                       _tracking_resp.get("hint", "(not present)"),
-                        "pickup_code":                _tracking_resp.get("pickup_code", "(not present)"),
-                    })
-                except Exception as e:
-                    st.error(f"❌ get_tracking_number failed: {type(e).__name__}: {e}")
-        # ----------------------------------------------------------------
-        # END TEMPORARY — test get_tracking_number
-        # ----------------------------------------------------------------
-
-        # ----------------------------------------------------------------
         # END Phase 1
         # ----------------------------------------------------------------
 
