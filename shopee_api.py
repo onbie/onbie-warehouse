@@ -43,6 +43,7 @@ SHOPEE_HOST = "https://partner.shopeemobile.com"
 
 ORDER_LIST_PATH   = "/api/v2/order/get_order_list"
 ORDER_DETAIL_PATH = "/api/v2/order/get_order_detail"
+LOGISTICS_TRACKING_NUMBER_PATH = "/api/v2/logistics/get_tracking_number"
 
 # Maximum orders per page allowed by Shopee v2.
 ORDER_LIST_PAGE_SIZE = 100
@@ -578,6 +579,26 @@ def get_order_detail(
         len(all_order_details),
     )
     return all_order_details
+
+
+# ---------------------------------------------------------------------------
+# Logistics: tracking number
+# ---------------------------------------------------------------------------
+
+def get_tracking_number(order_sn: str, package_number: Optional[str] = None) -> Dict:
+    """Retrieve the actual carrier tracking number (AWB) for an order via
+    GET /api/v2/logistics/get_tracking_number.
+    """
+    params = {"order_sn": order_sn}
+    if package_number:
+        params["package_number"] = package_number
+
+    logger.info(
+        "get_tracking_number: order_sn=%s package_number=%s",
+        order_sn, package_number or "(not provided)",
+    )
+
+    return _shopee_get(LOGISTICS_TRACKING_NUMBER_PATH, params)
 
 
 # ---------------------------------------------------------------------------
