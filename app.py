@@ -950,7 +950,11 @@ else:
     # Keep the scan box focused and ready for the next barcode
     focus_search_box()
 
-    st.divider()
+    # Tighter vertical gap here specifically (search area -> metrics),
+    # via a low-margin <hr> instead of st.divider()'s default spacing.
+    # Scoped to this one spot only — no global CSS, other dividers/sections
+    # on the page are unaffected.
+    st.markdown("<hr style='margin: 0.25rem 0;'>", unsafe_allow_html=True)
 
     # Use one row per unique order to avoid double-counting multi-product orders
     packed_orders = load_packed_orders()
