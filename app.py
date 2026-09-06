@@ -990,7 +990,19 @@ else:
     st.divider()
     st.write("### 📋 Order Belum Diverifikasi")
 
-    belum_df = unique_orders[unique_orders["__packable"] & ~unique_orders["__packed"]].copy()
+    # Sourced from the full orders_df (one row per product/variant), not
+    # unique_orders — unique_orders is deduped to one row per order for the
+    # counts/metrics above, which would silently hide additional variants
+    # on a multi-item order here. Order-level info (recipient, shop, etc.)
+    # is already repeated on every variant row by adapt_shopee_api_to_df(),
+    # so this is safe: 1 order with 2 variants -> 2 rows, each fully valid.
+    belum_source = orders_df.copy()
+    belum_source["__cancelled"] = belum_source["Status Pesanan"].apply(is_cancelled_status)
+    belum_source["__packable"] = belum_source["Status Pesanan"].apply(is_packable_status)
+    belum_source["__order_no_str"] = belum_source["No. Pesanan"].astype(str).str.strip()
+    belum_source["__packed"] = belum_source["__order_no_str"].isin(packed_orders)
+
+    belum_df = belum_source[belum_source["__packable"] & ~belum_source["__packed"]].copy()
 
     if belum_df.empty:
         st.success("Tidak ada order 'Perlu Dikirim' yang belum diverifikasi.")
