@@ -704,6 +704,91 @@ def style_dashboard_table(df, wrap_columns=None):
     return styler
 
 
+def _safe_cell(val):
+    """Render a table cell value safely: pandas/numpy NaN, None, or blank
+    strings all fall back to '-' instead of literal 'nan' text."""
+    if val is None:
+        return "-"
+    try:
+        if pd.isna(val):
+            return "-"
+    except (TypeError, ValueError):
+        pass
+    s = str(val).strip()
+    return s if s and s.lower() != "nan" else "-"
+
+
+def build_rowspan_rows_html(df, group_col, merge_cols, other_cols, blank_cols=None, right_align_cols=None):
+    """Return concatenated <tr>...</tr> HTML for df, grouped by group_col:
+    merge_cols get rowspan="{n}" on only the first row of each group;
+    other_cols always get their own cell on every row (right-aligned if
+    named in right_align_cols); blank_cols always render an empty <td></td>
+    on every row (e.g. a printed "Keterangan" column meant to be filled in
+    by hand). Shared by all three rowspan tables below — on-screen "Order
+    Belum Diverifikasi", on-screen "Laporan Packing Hari Ini", and its
+    print preview — so their grouping logic can't drift apart.
+    """
+    blank_cols = blank_cols or []
+    right_align_cols = set(right_align_cols or [])
+    rows = []
+    for _, group in df.groupby(group_col, sort=False):
+        n = len(group)
+        for i, (_, r) in enumerate(group.iterrows()):
+            cells = []
+            if i == 0:
+                for col in merge_cols:
+                    cells.append(f'<td rowspan="{n}">{_safe_cell(r.get(col))}</td>')
+            for col in other_cols:
+                cls = ' class="rowspan-qty-cell"' if col in right_align_cols else ""
+                cells.append(f"<td{cls}>{_safe_cell(r.get(col))}</td>")
+            for _ in blank_cols:
+                cells.append("<td></td>")
+            rows.append("<tr>" + "".join(cells) + "</tr>")
+    return "".join(rows)
+
+
+# Shared CSS for the two ON-SCREEN rowspan tables ("Order Belum
+# Diverifikasi" and "Laporan Packing Hari Ini"). Values reproduce
+# st.dataframe()'s actual dark-theme rendering as verified against a real
+# screenshot earlier (dark background, subtle borders, rounded outer
+# corners, left-aligned text / right-aligned Qty, compact rows) — st.
+# dataframe() itself can't rowspan, so this is a real HTML <table> instead,
+# styled to match as closely as an HTML table can. The print preview uses
+# its own separate print-oriented CSS (already in daily_report_html) and
+# does not use this constant.
+ONSCREEN_ROWSPAN_TABLE_STYLE = (
+    "<style>"
+    ".rowspan-order-wrapper{border:1px solid rgba(250,250,250,0.2);"
+    "border-radius:8px;overflow:hidden;width:100%;}"
+    ".rowspan-order-table{border-collapse:collapse;width:100%;"
+    "background-color:#0e1117;color:#fafafa;font-size:14px;}"
+    ".rowspan-order-table th{background-color:#262730;color:#fafafa;"
+    "font-weight:600;text-align:left;padding:8px 14px;"
+    "border:1px solid rgba(250,250,250,0.2);}"
+    ".rowspan-order-table td{text-align:left;vertical-align:middle;"
+    "padding:8px 14px;border:1px solid rgba(250,250,250,0.2);}"
+    ".rowspan-order-table td.rowspan-qty-cell{text-align:right;}"
+    "</style>"
+)
+
+
+def render_onscreen_rowspan_table(df, group_col, headers, merge_cols, other_cols, right_align_cols=None):
+    """Build a full on-screen rowspan <table> (style + header + grouped
+    body rows) using ONSCREEN_ROWSPAN_TABLE_STYLE. Pass the result to
+    st.markdown(..., unsafe_allow_html=True)."""
+    header_html = "".join(f"<th>{h}</th>" for h in headers)
+    body_html = build_rowspan_rows_html(df, group_col, merge_cols, other_cols, right_align_cols=right_align_cols)
+    return (
+        ONSCREEN_ROWSPAN_TABLE_STYLE
+        + '<div class="rowspan-order-wrapper">'
+        + '<table class="rowspan-order-table"><tr>'
+        + header_html
+        + "</tr>"
+        + body_html
+        + "</table></div>"
+    )
+
+
 def focus_search_box():
     components.html(
         """
@@ -1023,12 +1108,15 @@ else:
             "Jumlah": "Qty",
         })[["Order Number", "Username", "Recipient", "Platform", "Shop", "Kabupaten/Kota", "Shipping", "Variant", "Qty"]]
 
-        styled_belum_df = belum_display_df
-        st.dataframe(
-            styled_belum_df,
-            use_container_width=True,
-            hide_index=True,
+        belum_table_html = render_onscreen_rowspan_table(
+            belum_display_df,
+            group_col="Order Number",
+            headers=["Order Number", "Username", "Recipient", "Platform", "Shop", "Kabupaten/Kota", "Shipping", "Variant", "Qty"],
+            merge_cols=["Order Number", "Username", "Recipient", "Platform", "Shop", "Kabupaten/Kota", "Shipping"],
+            other_cols=["Variant", "Qty"],
+            right_align_cols=["Qty"],
         )
+        st.markdown(belum_table_html, unsafe_allow_html=True)
 
     # ---- Daily packing report (all orders packed today) ----
     st.divider()
@@ -1077,50 +1165,34 @@ else:
             "Nama Variasi": "Variant",
             "Jumlah": "Qty"
         })
-        st.dataframe(
+        daily_report_onscreen_html = render_onscreen_rowspan_table(
             styled_report_df,
-            use_container_width=True,
-            hide_index=True,
+            group_col="Order Number",
+            headers=["Order Number", "Username", "Recipient", "Platform", "Shop", "Kabupaten/Kota", "Shipping", "Variant", "Qty"],
+            merge_cols=["Order Number", "Username", "Recipient", "Platform", "Shop", "Kabupaten/Kota", "Shipping"],
+            other_cols=["Variant", "Qty"],
+            right_align_cols=["Qty"],
         )
+        st.markdown(daily_report_onscreen_html, unsafe_allow_html=True)
 
         # Build printable daily report HTML — order-level columns (No.
         # Pesanan, Username, Nama Penerima, Platform, Toko, Kabupaten/Kota,
         # Antar ke counter/pick-up) merged via rowspan across consecutive
         # rows of the same order; Variasi, Qty, Keterangan stay on every
-        # row. PRINT-ONLY — the on-screen st.dataframe(styled_report_df,
-        # ...) above is untouched, still native and un-grouped.
-        _report_print_rows_html = []
-        for _, _report_group in report_rows.groupby("No. Pesanan", sort=False):
-            _n_variants = len(_report_group)
-            for _row_i, (_, r) in enumerate(_report_group.iterrows()):
-                if _row_i == 0:
-                    _report_print_rows_html.append(
-                        f"""
-                        <tr>
-                            <td rowspan="{_n_variants}">{r.get('No. Pesanan','-')}</td>
-                            <td rowspan="{_n_variants}">{r.get('Username (Pembeli)','-')}</td>
-                            <td rowspan="{_n_variants}">{r.get('Nama Penerima','-')}</td>
-                            <td rowspan="{_n_variants}">{r.get('Platform','-')}</td>
-                            <td rowspan="{_n_variants}">{r.get('Toko','-')}</td>
-                            <td rowspan="{_n_variants}">{r.get('Kota/Kabupaten','-')}</td>
-                            <td rowspan="{_n_variants}">{r.get('Antar ke counter/ pick-up','-')}</td>
-                            <td>{r.get('Nama Variasi','-')}</td>
-                            <td>{int(r.get('Jumlah',0)) if pd.notna(r.get('Jumlah')) else 0}</td>
-                            <td></td>
-                        </tr>
-                        """
-                    )
-                else:
-                    _report_print_rows_html.append(
-                        f"""
-                        <tr>
-                            <td>{r.get('Nama Variasi','-')}</td>
-                            <td>{int(r.get('Jumlah',0)) if pd.notna(r.get('Jumlah')) else 0}</td>
-                            <td></td>
-                        </tr>
-                        """
-                    )
-        report_table_rows = "".join(_report_print_rows_html)
+        # row. Now built via the same shared build_rowspan_rows_html() the
+        # on-screen table above uses, with its own print-oriented CSS below
+        # (Arial/white, separate from the on-screen dark styling).
+        _report_rows_for_print = report_rows.copy()
+        _report_rows_for_print["Jumlah"] = _report_rows_for_print["Jumlah"].apply(
+            lambda v: int(v) if pd.notna(v) else 0
+        )
+        report_table_rows = build_rowspan_rows_html(
+            _report_rows_for_print,
+            group_col="No. Pesanan",
+            merge_cols=["No. Pesanan", "Username (Pembeli)", "Nama Penerima", "Platform", "Toko", "Kota/Kabupaten", "Antar ke counter/ pick-up"],
+            other_cols=["Nama Variasi", "Jumlah"],
+            blank_cols=["Keterangan"],
+        )
 
         daily_report_html = f"""
         <html>
