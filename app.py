@@ -1083,24 +1083,44 @@ else:
             hide_index=True,
         )
 
-        # Build printable daily report HTML
-        report_table_rows = "".join(
-            f"""
-            <tr>
-                <td>{r.get('No. Pesanan','-')}</td>
-                <td>{r.get('Username (Pembeli)','-')}</td>
-                <td>{r.get('Nama Penerima','-')}</td>
-                <td>{r.get('Platform','-')}</td>
-                <td>{r.get('Toko','-')}</td>
-                <td>{r.get('Kota/Kabupaten','-')}</td>
-                <td>{r.get('Antar ke counter/ pick-up','-')}</td>
-                <td>{r.get('Nama Variasi','-')}</td>
-                <td>{int(r.get('Jumlah',0)) if pd.notna(r.get('Jumlah')) else 0}</td>
-                <td></td>
-            </tr>
-            """
-            for _, r in report_rows.iterrows()
-        )
+        # Build printable daily report HTML — order-level columns (No.
+        # Pesanan, Username, Nama Penerima, Platform, Toko, Kabupaten/Kota,
+        # Antar ke counter/pick-up) merged via rowspan across consecutive
+        # rows of the same order; Variasi, Qty, Keterangan stay on every
+        # row. PRINT-ONLY — the on-screen st.dataframe(styled_report_df,
+        # ...) above is untouched, still native and un-grouped.
+        _report_print_rows_html = []
+        for _, _report_group in report_rows.groupby("No. Pesanan", sort=False):
+            _n_variants = len(_report_group)
+            for _row_i, (_, r) in enumerate(_report_group.iterrows()):
+                if _row_i == 0:
+                    _report_print_rows_html.append(
+                        f"""
+                        <tr>
+                            <td rowspan="{_n_variants}">{r.get('No. Pesanan','-')}</td>
+                            <td rowspan="{_n_variants}">{r.get('Username (Pembeli)','-')}</td>
+                            <td rowspan="{_n_variants}">{r.get('Nama Penerima','-')}</td>
+                            <td rowspan="{_n_variants}">{r.get('Platform','-')}</td>
+                            <td rowspan="{_n_variants}">{r.get('Toko','-')}</td>
+                            <td rowspan="{_n_variants}">{r.get('Kota/Kabupaten','-')}</td>
+                            <td rowspan="{_n_variants}">{r.get('Antar ke counter/ pick-up','-')}</td>
+                            <td>{r.get('Nama Variasi','-')}</td>
+                            <td>{int(r.get('Jumlah',0)) if pd.notna(r.get('Jumlah')) else 0}</td>
+                            <td></td>
+                        </tr>
+                        """
+                    )
+                else:
+                    _report_print_rows_html.append(
+                        f"""
+                        <tr>
+                            <td>{r.get('Nama Variasi','-')}</td>
+                            <td>{int(r.get('Jumlah',0)) if pd.notna(r.get('Jumlah')) else 0}</td>
+                            <td></td>
+                        </tr>
+                        """
+                    )
+        report_table_rows = "".join(_report_print_rows_html)
 
         daily_report_html = f"""
         <html>
