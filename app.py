@@ -747,48 +747,6 @@ def build_rowspan_rows_html(df, group_col, merge_cols, other_cols, blank_cols=No
     return "".join(rows)
 
 
-# Shared CSS for the two ON-SCREEN rowspan tables ("Order Belum
-# Diverifikasi" and "Laporan Packing Hari Ini"). Values reproduce
-# st.dataframe()'s actual dark-theme rendering as verified against a real
-# screenshot earlier (dark background, subtle borders, rounded outer
-# corners, left-aligned text / right-aligned Qty, compact rows) — st.
-# dataframe() itself can't rowspan, so this is a real HTML <table> instead,
-# styled to match as closely as an HTML table can. The print preview uses
-# its own separate print-oriented CSS (already in daily_report_html) and
-# does not use this constant.
-ONSCREEN_ROWSPAN_TABLE_STYLE = (
-    "<style>"
-    ".rowspan-order-wrapper{border:1px solid rgba(250,250,250,0.2);"
-    "border-radius:8px;overflow:hidden;width:100%;}"
-    ".rowspan-order-table{border-collapse:collapse;width:100%;"
-    "background-color:#0e1117;color:#fafafa;font-size:14px;}"
-    ".rowspan-order-table th{background-color:#262730;color:#fafafa;"
-    "font-weight:600;text-align:left;padding:8px 14px;"
-    "border:1px solid rgba(250,250,250,0.2);}"
-    ".rowspan-order-table td{text-align:left;vertical-align:middle;"
-    "padding:8px 14px;border:1px solid rgba(250,250,250,0.2);}"
-    ".rowspan-order-table td.rowspan-qty-cell{text-align:right;}"
-    "</style>"
-)
-
-
-def render_onscreen_rowspan_table(df, group_col, headers, merge_cols, other_cols, right_align_cols=None):
-    """Build a full on-screen rowspan <table> (style + header + grouped
-    body rows) using ONSCREEN_ROWSPAN_TABLE_STYLE. Pass the result to
-    st.markdown(..., unsafe_allow_html=True)."""
-    header_html = "".join(f"<th>{h}</th>" for h in headers)
-    body_html = build_rowspan_rows_html(df, group_col, merge_cols, other_cols, right_align_cols=right_align_cols)
-    return (
-        ONSCREEN_ROWSPAN_TABLE_STYLE
-        + '<div class="rowspan-order-wrapper">'
-        + '<table class="rowspan-order-table"><tr>'
-        + header_html
-        + "</tr>"
-        + body_html
-        + "</table></div>"
-    )
-
-
 def focus_search_box():
     components.html(
         """
@@ -1108,15 +1066,12 @@ else:
             "Jumlah": "Qty",
         })[["Order Number", "Username", "Recipient", "Platform", "Shop", "Kabupaten/Kota", "Shipping", "Variant", "Qty"]]
 
-        belum_table_html = render_onscreen_rowspan_table(
-            belum_display_df,
-            group_col="Order Number",
-            headers=["Order Number", "Username", "Recipient", "Platform", "Shop", "Kabupaten/Kota", "Shipping", "Variant", "Qty"],
-            merge_cols=["Order Number", "Username", "Recipient", "Platform", "Shop", "Kabupaten/Kota", "Shipping"],
-            other_cols=["Variant", "Qty"],
-            right_align_cols=["Qty"],
+        styled_belum_df = belum_display_df
+        st.dataframe(
+            styled_belum_df,
+            use_container_width=True,
+            hide_index=True,
         )
-        st.markdown(belum_table_html, unsafe_allow_html=True)
 
     # ---- Daily packing report (all orders packed today) ----
     st.divider()
@@ -1165,15 +1120,11 @@ else:
             "Nama Variasi": "Variant",
             "Jumlah": "Qty"
         })
-        daily_report_onscreen_html = render_onscreen_rowspan_table(
+        st.dataframe(
             styled_report_df,
-            group_col="Order Number",
-            headers=["Order Number", "Username", "Recipient", "Platform", "Shop", "Kabupaten/Kota", "Shipping", "Variant", "Qty"],
-            merge_cols=["Order Number", "Username", "Recipient", "Platform", "Shop", "Kabupaten/Kota", "Shipping"],
-            other_cols=["Variant", "Qty"],
-            right_align_cols=["Qty"],
+            use_container_width=True,
+            hide_index=True,
         )
-        st.markdown(daily_report_onscreen_html, unsafe_allow_html=True)
 
         # Build printable daily report HTML — order-level columns (No.
         # Pesanan, Username, Nama Penerima, Platform, Toko, Kabupaten/Kota,
