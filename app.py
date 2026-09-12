@@ -752,6 +752,42 @@ with st.sidebar:
         # ----------------------------------------------------------------
 
         # ----------------------------------------------------------------
+        # TEMPORARY — Test Package List diagnostic. Fetches the first
+        # order in the current packing queue's raw package_list by calling
+        # the existing shopee_api.get_order_detail() directly (the same
+        # production function _sync_shopee_orders_now() already uses) with
+        # response_optional_fields=["package_list"] — reusing the real
+        # order-detail/auth logic as-is, no raw request built by hand here.
+        # Does not modify shopee_api.py or any production packing logic;
+        # this is a read-only diagnostic call.
+        # ----------------------------------------------------------------
+        if st.button("🧪 Test Package List", key="btn_test_package_list"):
+            _orders_df_for_pkg_test = st.session_state.get("shopee_orders_df")
+            if _orders_df_for_pkg_test is None or _orders_df_for_pkg_test.empty:
+                st.warning("Belum ada order Shopee di packing queue. Klik Sync Now dulu.")
+            else:
+                _pkg_test_order_sn = str(_orders_df_for_pkg_test.iloc[0]["No. Pesanan"]).strip()
+                st.caption(f"Testing order_sn: {_pkg_test_order_sn}")
+                try:
+                    import shopee_api as _shopee_api_pkg_test
+                    _pkg_test_details = _shopee_api_pkg_test.get_order_detail(
+                        order_sn_list=[_pkg_test_order_sn],
+                        response_optional_fields=["package_list"],
+                    )
+                    if not _pkg_test_details:
+                        st.warning("Tidak ada order detail dikembalikan untuk order_sn ini.")
+                    else:
+                        _pkg_list = _pkg_test_details[0].get("package_list", "(key not present in response)")
+                        st.write(f"**package_list type:** {type(_pkg_list).__name__}")
+                        st.write("**Full package_list (tokens/secrets/signatures redacted if present):**")
+                        st.json(_redact_sensitive_diag(_pkg_list))
+                except Exception as e:
+                    st.error(f"❌ Package List diagnostic failed: {type(e).__name__}: {e}")
+        # ----------------------------------------------------------------
+        # END TEMPORARY — Test Package List diagnostic
+        # ----------------------------------------------------------------
+
+        # ----------------------------------------------------------------
         # END Phase 1
         # ----------------------------------------------------------------
 
