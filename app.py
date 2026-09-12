@@ -788,6 +788,95 @@ with st.sidebar:
         # ----------------------------------------------------------------
 
         # ----------------------------------------------------------------
+        # TEMPORARY — Test Channel List diagnostic. Calls GET
+        # /api/v2/logistics/get_channel_list — a shop-level endpoint (no
+        # order_sn needed). Makes its own raw signed request the same way
+        # the Shipping Parameter / Tracking Info diagnostics do, reusing
+        # existing shopee_auth/shopee_api helper functions for token +
+        # signature (no auth/signing logic duplicated or changed, and
+        # shopee_api.py itself is not modified). Looks for the channel
+        # entry with logistics_channel_id == 80045 inside whatever
+        # list-shaped field the response actually uses (commonly
+        # "logistics_channel_list"), rather than assuming the exact key
+        # name — the field name is confirmed from the live response here,
+        # not guessed in advance.
+        # ----------------------------------------------------------------
+        if st.button("🧪 Test Channel List", key="btn_test_channel_list"):
+            try:
+                import shopee_api as _shopee_api_chan_test
+                import shopee_auth as _shopee_auth_chan_test
+                import requests as _requests_chan_test
+                import time as _time_chan_test
+
+                _access_token = _shopee_auth_chan_test.get_valid_access_token()
+                _tokens = _shopee_auth_chan_test.load_tokens()
+                _shop_id = int(_tokens.get("shop_id", 0)) if _tokens else 0
+                _partner_id, _partner_key = _shopee_auth_chan_test.get_credentials()
+                _timestamp = int(_time_chan_test.time())
+                _channel_list_path = "/api/v2/logistics/get_channel_list"
+                _sign = _shopee_api_chan_test._generate_protected_signature(
+                    _partner_id, _channel_list_path, _timestamp,
+                    _access_token, _shop_id, _partner_key,
+                )
+                _query_params = {
+                    "partner_id":   _partner_id,
+                    "timestamp":    _timestamp,
+                    "sign":         _sign,
+                    "access_token": _access_token,
+                    "shop_id":      _shop_id,
+                }
+                _url = f"{_shopee_api_chan_test.SHOPEE_HOST}{_channel_list_path}"
+                _raw_resp = _requests_chan_test.get(_url, params=_query_params, timeout=15)
+                _raw_data = _raw_resp.json()
+
+                st.success(f"✅ Raw HTTP status: {_raw_resp.status_code}")
+                st.write(f"**Top-level keys:** {sorted(_raw_data.keys())}")
+                st.write(f"**error:** {_raw_data.get('error', '(key not present)')}")
+                st.write(f"**message:** {_raw_data.get('message', '(key not present)')}")
+                st.write(f"**request_id:** {_raw_data.get('request_id', '(key not present)')}")
+
+                _chan_response_field = _raw_data.get("response", {})
+                if isinstance(_chan_response_field, dict):
+                    st.write(f"**response keys:** {sorted(_chan_response_field.keys())}")
+
+                    # Find whichever list-shaped field actually holds the
+                    # channel entries — try the commonly-documented key
+                    # first, then fall back to scanning any list value.
+                    _channel_list = _chan_response_field.get("logistics_channel_list")
+                    _channel_list_key = "logistics_channel_list"
+                    if not isinstance(_channel_list, list):
+                        _channel_list = None
+                        for _k, _v in _chan_response_field.items():
+                            if isinstance(_v, list):
+                                _channel_list = _v
+                                _channel_list_key = _k
+                                break
+
+                    if _channel_list is None:
+                        st.warning("Tidak ditemukan field berbentuk list di response ini.")
+                    else:
+                        st.write(f"**Channel list found under key:** `{_channel_list_key}` ({len(_channel_list)} entries)")
+                        _matched_channel = next(
+                            (ch for ch in _channel_list
+                             if isinstance(ch, dict) and ch.get("logistics_channel_id") == 80045),
+                            None,
+                        )
+                        if _matched_channel is None:
+                            st.warning("logistics_channel_id 80045 tidak ditemukan di channel list ini.")
+                            st.write(f"**Available logistics_channel_id values:** "
+                                     f"{[ch.get('logistics_channel_id') for ch in _channel_list if isinstance(ch, dict)]}")
+                        else:
+                            st.write("**Channel 80045 — full entry (tokens/secrets/signatures redacted if present):**")
+                            st.json(_redact_sensitive_diag(_matched_channel))
+                else:
+                    st.write(f"**response (unexpected type):** {type(_chan_response_field).__name__}")
+            except Exception as e:
+                st.error(f"❌ Channel List diagnostic failed: {type(e).__name__}: {e}")
+        # ----------------------------------------------------------------
+        # END TEMPORARY — Test Channel List diagnostic
+        # ----------------------------------------------------------------
+
+        # ----------------------------------------------------------------
         # END Phase 1
         # ----------------------------------------------------------------
 
