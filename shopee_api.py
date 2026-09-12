@@ -236,8 +236,9 @@ def _shopee_get(api_path: str, params: Dict) -> Dict:
     response_data = data.get("response", {})
 
     logger.warning(
-        "Shopee API trace: path=%s request_id=%s nested_request_id=%s "
-        "header_request_id=%s warning=%s response_keys=%s",
+        "Shopee API trace: timestamp=%s path=%s request_id=%s "
+        "nested_request_id=%s header_request_id=%s warning=%s response_keys=%s",
+        timestamp,
         api_path,
         data.get("request_id", ""),
         response_data.get("request_id", "") if isinstance(response_data, dict) else "",
