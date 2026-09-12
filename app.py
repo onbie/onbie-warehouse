@@ -676,6 +676,82 @@ with st.sidebar:
         # ----------------------------------------------------------------
 
         # ----------------------------------------------------------------
+        # TEMPORARY — Test Tracking Info diagnostic. Calls GET
+        # /api/v2/logistics/get_tracking_info for the first order in the
+        # current packing queue (st.session_state["shopee_orders_df"]),
+        # using its "No. Pesanan" as order_sn — no new API call to fetch an
+        # order, reuses what's already synced.
+        #
+        # package_number: NOT included. It isn't present anywhere in the
+        # currently mapped order data — adapt_shopee_api_to_df() only ever
+        # extracts package_list[].tracking_number (for "No. Resi") and
+        # discards package_number itself; it was never stored as a column
+        # in orders_df/shopee_orders_df. Sending a fabricated value would
+        # violate "do not guess," so this only sends order_sn. If Shopee
+        # requires package_number for this specific order, that will show
+        # up directly in this diagnostic's own error/message output below.
+        #
+        # Reuses existing shopee_auth/shopee_api helper functions for
+        # token + signature (no auth/signing logic duplicated or changed);
+        # shopee_api.py and production packing logic are not modified.
+        # ----------------------------------------------------------------
+        if st.button("🧪 Test Tracking Info", key="btn_test_tracking_info"):
+            _orders_df_for_track_test = st.session_state.get("shopee_orders_df")
+            if _orders_df_for_track_test is None or _orders_df_for_track_test.empty:
+                st.warning("Belum ada order Shopee di packing queue. Klik Sync Now dulu.")
+            else:
+                _track_test_order_sn = str(_orders_df_for_track_test.iloc[0]["No. Pesanan"]).strip()
+                st.caption(f"Testing order_sn: {_track_test_order_sn}")
+                st.caption("package_number: not available in existing order data — omitted, not guessed.")
+                try:
+                    import shopee_api as _shopee_api_track_test
+                    import shopee_auth as _shopee_auth_track_test
+                    import requests as _requests_track_test
+                    import time as _time_track_test
+
+                    _access_token = _shopee_auth_track_test.get_valid_access_token()
+                    _tokens = _shopee_auth_track_test.load_tokens()
+                    _shop_id = int(_tokens.get("shop_id", 0)) if _tokens else 0
+                    _partner_id, _partner_key = _shopee_auth_track_test.get_credentials()
+                    _timestamp = int(_time_track_test.time())
+                    _tracking_info_path = "/api/v2/logistics/get_tracking_info"
+                    _sign = _shopee_api_track_test._generate_protected_signature(
+                        _partner_id, _tracking_info_path, _timestamp,
+                        _access_token, _shop_id, _partner_key,
+                    )
+                    _query_params = {
+                        "partner_id":   _partner_id,
+                        "timestamp":    _timestamp,
+                        "sign":         _sign,
+                        "access_token": _access_token,
+                        "shop_id":      _shop_id,
+                        "order_sn":     _track_test_order_sn,
+                    }
+                    _url = f"{_shopee_api_track_test.SHOPEE_HOST}{_tracking_info_path}"
+                    _raw_resp = _requests_track_test.get(_url, params=_query_params, timeout=15)
+                    _raw_data = _raw_resp.json()
+
+                    st.success(f"✅ Raw HTTP status: {_raw_resp.status_code}")
+                    st.write(f"**Top-level keys:** {sorted(_raw_data.keys())}")
+                    st.write(f"**error:** {_raw_data.get('error', '(key not present)')}")
+                    st.write(f"**message:** {_raw_data.get('message', '(key not present)')}")
+                    st.write(f"**request_id:** {_raw_data.get('request_id', '(key not present)')}")
+
+                    _track_response_field = _raw_data.get("response", {})
+                    if isinstance(_track_response_field, dict):
+                        st.write(f"**response keys:** {sorted(_track_response_field.keys())}")
+                    else:
+                        st.write(f"**response (unexpected type):** {type(_track_response_field).__name__}")
+
+                    st.write("**Full response (tokens/secrets/signatures redacted if present):**")
+                    st.json(_redact_sensitive_diag(_raw_data))
+                except Exception as e:
+                    st.error(f"❌ Tracking Info diagnostic failed: {type(e).__name__}: {e}")
+        # ----------------------------------------------------------------
+        # END TEMPORARY — Test Tracking Info diagnostic
+        # ----------------------------------------------------------------
+
+        # ----------------------------------------------------------------
         # END Phase 1
         # ----------------------------------------------------------------
 
