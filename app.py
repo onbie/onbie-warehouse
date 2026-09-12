@@ -593,6 +593,89 @@ with st.sidebar:
         # ----------------------------------------------------------------
 
         # ----------------------------------------------------------------
+        # TEMPORARY — Test Shipping Parameter diagnostic. Calls GET
+        # /api/v2/logistics/get_shipping_parameter for the first order in
+        # the current packing queue (st.session_state["shopee_orders_df"]),
+        # using its "No. Pesanan" as order_sn — no new API call to fetch an
+        # order, reuses what's already synced. Makes its own raw signed
+        # request the same way the Test Shop Info diagnostic does, reusing
+        # existing shopee_auth/shopee_api helper functions for token +
+        # signature (no auth/signing logic duplicated or changed, and
+        # shopee_api.py itself is not modified). Any key whose name looks
+        # like a token/secret/signature is redacted before display, as a
+        # safety net; everything else (including the full response) is
+        # shown as-is per this diagnostic's scope.
+        # ----------------------------------------------------------------
+        def _redact_sensitive_diag(obj):
+            """Recursively redact any dict key that looks like a
+            token/secret/signature, anywhere in the structure."""
+            _sensitive_key_substrings = ("token", "secret", "sign", "partner_key", "password")
+            if isinstance(obj, dict):
+                return {
+                    k: ("<redacted>" if any(s in str(k).lower() for s in _sensitive_key_substrings)
+                        else _redact_sensitive_diag(v))
+                    for k, v in obj.items()
+                }
+            if isinstance(obj, list):
+                return [_redact_sensitive_diag(v) for v in obj]
+            return obj
+
+        if st.button("🧪 Test Shipping Parameter", key="btn_test_shipping_parameter"):
+            _orders_df_for_ship_test = st.session_state.get("shopee_orders_df")
+            if _orders_df_for_ship_test is None or _orders_df_for_ship_test.empty:
+                st.warning("Belum ada order Shopee di packing queue. Klik Sync Now dulu.")
+            else:
+                _ship_test_order_sn = str(_orders_df_for_ship_test.iloc[0]["No. Pesanan"]).strip()
+                st.caption(f"Testing order_sn: {_ship_test_order_sn}")
+                try:
+                    import shopee_api as _shopee_api_ship_test
+                    import shopee_auth as _shopee_auth_ship_test
+                    import requests as _requests_ship_test
+                    import time as _time_ship_test
+
+                    _access_token = _shopee_auth_ship_test.get_valid_access_token()
+                    _tokens = _shopee_auth_ship_test.load_tokens()
+                    _shop_id = int(_tokens.get("shop_id", 0)) if _tokens else 0
+                    _partner_id, _partner_key = _shopee_auth_ship_test.get_credentials()
+                    _timestamp = int(_time_ship_test.time())
+                    _shipping_param_path = "/api/v2/logistics/get_shipping_parameter"
+                    _sign = _shopee_api_ship_test._generate_protected_signature(
+                        _partner_id, _shipping_param_path, _timestamp,
+                        _access_token, _shop_id, _partner_key,
+                    )
+                    _query_params = {
+                        "partner_id":   _partner_id,
+                        "timestamp":    _timestamp,
+                        "sign":         _sign,
+                        "access_token": _access_token,
+                        "shop_id":      _shop_id,
+                        "order_sn":     _ship_test_order_sn,
+                    }
+                    _url = f"{_shopee_api_ship_test.SHOPEE_HOST}{_shipping_param_path}"
+                    _raw_resp = _requests_ship_test.get(_url, params=_query_params, timeout=15)
+                    _raw_data = _raw_resp.json()
+
+                    st.success(f"✅ Raw HTTP status: {_raw_resp.status_code}")
+                    st.write(f"**Top-level keys:** {sorted(_raw_data.keys())}")
+                    st.write(f"**error:** {_raw_data.get('error', '(key not present)')}")
+                    st.write(f"**message:** {_raw_data.get('message', '(key not present)')}")
+                    st.write(f"**request_id:** {_raw_data.get('request_id', '(key not present)')}")
+
+                    _ship_response_field = _raw_data.get("response", {})
+                    if isinstance(_ship_response_field, dict):
+                        st.write(f"**response keys:** {sorted(_ship_response_field.keys())}")
+                    else:
+                        st.write(f"**response (unexpected type):** {type(_ship_response_field).__name__}")
+
+                    st.write("**Full response (tokens/secrets/signatures redacted if present):**")
+                    st.json(_redact_sensitive_diag(_raw_data))
+                except Exception as e:
+                    st.error(f"❌ Shipping Parameter diagnostic failed: {type(e).__name__}: {e}")
+        # ----------------------------------------------------------------
+        # END TEMPORARY — Test Shipping Parameter diagnostic
+        # ----------------------------------------------------------------
+
+        # ----------------------------------------------------------------
         # END Phase 1
         # ----------------------------------------------------------------
 
