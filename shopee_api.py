@@ -112,7 +112,7 @@ def _generate_protected_signature(
 # Authenticated request helper
 # ---------------------------------------------------------------------------
 
-def _shopee_get(api_path: str, params: Dict) -> Dict:
+def _shopee_get(api_path: str, params: Dict, unwrap_response: bool = True) -> Dict:
     """Send an authenticated GET request to a Shopee v2 protected endpoint.
 
     Handles:
@@ -128,10 +128,20 @@ def _shopee_get(api_path: str, params: Dict) -> Dict:
         params:   Additional query parameters specific to the endpoint.
                   Do NOT include partner_id, timestamp, sign, access_token,
                   or shop_id — those are added automatically.
+        unwrap_response: If True (default, unchanged behavior for every
+                  existing caller), returns data["response"] — the shape
+                  every other endpoint in this module uses. Some endpoints
+                  (confirmed for get_shop_info via the temporary raw-request
+                  diagnostic in app.py: Shopee returns shop_name at the
+                  TOP LEVEL of the JSON body, with "response" left as {})
+                  don't follow that convention. Pass False to get the full,
+                  unmodified top-level dict instead.
 
     Returns:
-        The "response" sub-dict from Shopee's JSON body, i.e. data["response"].
-        Callers should access order_list, order_sn_list, etc. from this dict.
+        By default, the "response" sub-dict from Shopee's JSON body, i.e.
+        data["response"] — callers should access order_list, order_sn_list,
+        etc. from this dict. If unwrap_response=False, the full top-level
+        dict instead.
 
     Raises:
         RuntimeError:          no saved tokens; Shopee application-level error.
@@ -234,21 +244,8 @@ def _shopee_get(api_path: str, params: Dict) -> Dict:
         )
 
     response_data = data.get("response", {})
-
-    logger.warning(
-        "Shopee API trace: timestamp=%s path=%s request_id=%s "
-        "nested_request_id=%s header_request_id=%s warning=%s response_keys=%s",
-        timestamp,
-        api_path,
-        data.get("request_id", ""),
-        response_data.get("request_id", "") if isinstance(response_data, dict) else "",
-        response.headers.get("x-request-id", "") or response.headers.get("request-id", ""),
-        data.get("warning", ""),
-        list(response_data.keys()) if isinstance(response_data, dict) else [],
-    )
-
     logger.debug("Shopee response body keys: %s", list(data.keys()))
-    return response_data
+    return response_data if unwrap_response else data
 
 
 def _shopee_post(api_path: str, body: Dict) -> Dict:
@@ -639,16 +636,23 @@ def get_shop_info() -> Dict:
     attaches (partner_id, timestamp, sign, access_token, shop_id) — this
     endpoint just describes the shop tied to the current access_token.
 
+    Unlike every other endpoint in this module, get_shop_info's shop_name
+    is returned at the TOP LEVEL of Shopee's JSON body, not nested under
+    "response" (which Shopee leaves as {} for this endpoint) — confirmed
+    via the temporary raw-request diagnostic in app.py. So this calls
+    _shopee_get(..., unwrap_response=False) and returns the full top-level
+    dict instead of the usual data["response"].
+
     Returns:
-        The "response" sub-dict from Shopee's JSON body, unwrapped by
-        _shopee_get() the same way as every other call in this module.
-        Expected to include a "shop_name" field among others.
+        The full top-level dict from Shopee's JSON body (error, message,
+        request_id, response, and shop_name all at this level). Expected
+        to include a "shop_name" field.
 
     Raises:
         RuntimeError, ValueError, requests.* — see _shopee_get().
     """
     logger.info("get_shop_info: fetching connected shop info")
-    return _shopee_get(SHOP_INFO_PATH, {})
+    return _shopee_get(SHOP_INFO_PATH, {}, unwrap_response=False)
 
 
 # ---------------------------------------------------------------------------
