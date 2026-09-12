@@ -219,6 +219,12 @@ def _shopee_get(api_path: str, params: Dict) -> Dict:
 
     try:
         data = response.json()
+        logger.info(
+            "Shopee API trace: path=%s request_id=%s warning=%s",
+            api_path,
+            data.get("request_id", ""),
+            data.get("warning", ""),
+        )
     except Exception:
         raise RuntimeError(
             f"JSON parse failure from Shopee (path={api_path}). "
