@@ -219,12 +219,6 @@ def _shopee_get(api_path: str, params: Dict) -> Dict:
 
     try:
         data = response.json()
-        logger.info(
-            "Shopee API trace: path=%s request_id=%s warning=%s",
-            api_path,
-            data.get("request_id", ""),
-            data.get("warning", ""),
-        )
     except Exception:
         raise RuntimeError(
             f"JSON parse failure from Shopee (path={api_path}). "
@@ -240,6 +234,18 @@ def _shopee_get(api_path: str, params: Dict) -> Dict:
         )
 
     response_data = data.get("response", {})
+
+    logger.warning(
+        "Shopee API trace: path=%s request_id=%s nested_request_id=%s "
+        "header_request_id=%s warning=%s response_keys=%s",
+        api_path,
+        data.get("request_id", ""),
+        response_data.get("request_id", "") if isinstance(response_data, dict) else "",
+        response.headers.get("x-request-id", "") or response.headers.get("request-id", ""),
+        data.get("warning", ""),
+        list(response_data.keys()) if isinstance(response_data, dict) else [],
+    )
+
     logger.debug("Shopee response body keys: %s", list(data.keys()))
     return response_data
 
