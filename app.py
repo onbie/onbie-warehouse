@@ -532,23 +532,62 @@ with st.sidebar:
 
         # ----------------------------------------------------------------
         # TEMPORARY — Test Shop Info diagnostic, remove once get_shop_info()
-        # is confirmed working. Calls shopee_api.get_shop_info() directly
-        # (NOT through _get_shopee_shop_name() — this is a separate,
-        # unrelated diagnostic call so it doesn't touch or depend on the
-        # existing cached shop-name logic at all). Only shows
-        # success/error, exception type+message, top-level response keys,
-        # and shop_name if present — never the full response, never any
+        # is confirmed working. Makes its own raw signed request (reusing
+        # existing shopee_auth/shopee_api helper functions for token +
+        # signature — no auth/signing logic duplicated or changed) instead
+        # of calling shopee_api.get_shop_info(), because get_shop_info()
+        # only returns data["response"] — _shopee_get() discards the
+        # top-level "error"/"message"/"warning" fields before returning,
+        # so they're otherwise invisible to any caller. This diagnostic
+        # inspects the full raw JSON body one level deeper than
+        # get_shop_info() can. Does not touch or depend on the existing
+        # cached shop-name logic (_get_shopee_shop_name()) at all. Only
+        # shows key names and a few known-safe fields (error, message,
+        # warning, shop_name) — never the full response, never any
         # token/secret/signature.
         # ----------------------------------------------------------------
         if st.button("🧪 Test Shop Info", key="btn_test_shop_info"):
             try:
                 import shopee_api as _shopee_api_shop_test
-                _shop_info_resp = _shopee_api_shop_test.get_shop_info()
-                st.success("✅ get_shop_info() call succeeded")
-                st.write(f"**Top-level response keys:** {sorted(_shop_info_resp.keys())}")
-                st.write(f"**shop_name:** {_shop_info_resp.get('shop_name', '(key not present in response)')}")
+                import shopee_auth as _shopee_auth_shop_test
+                import requests as _requests_shop_test
+                import time as _time_shop_test
+
+                _access_token = _shopee_auth_shop_test.get_valid_access_token()
+                _tokens = _shopee_auth_shop_test.load_tokens()
+                _shop_id = int(_tokens.get("shop_id", 0)) if _tokens else 0
+                _partner_id, _partner_key = _shopee_auth_shop_test.get_credentials()
+                _timestamp = int(_time_shop_test.time())
+                _sign = _shopee_api_shop_test._generate_protected_signature(
+                    _partner_id, _shopee_api_shop_test.SHOP_INFO_PATH,
+                    _timestamp, _access_token, _shop_id, _partner_key,
+                )
+                _query_params = {
+                    "partner_id":   _partner_id,
+                    "timestamp":    _timestamp,
+                    "sign":         _sign,
+                    "access_token": _access_token,
+                    "shop_id":      _shop_id,
+                }
+                _url = f"{_shopee_api_shop_test.SHOPEE_HOST}{_shopee_api_shop_test.SHOP_INFO_PATH}"
+                _raw_resp = _requests_shop_test.get(_url, params=_query_params, timeout=15)
+                _raw_data = _raw_resp.json()
+
+                st.success(f"✅ Raw HTTP status: {_raw_resp.status_code}")
+                st.write(f"**Top-level keys:** {sorted(_raw_data.keys())}")
+                st.write(f"**error:** {_raw_data.get('error', '(key not present)')}")
+                st.write(f"**message:** {_raw_data.get('message', '(key not present)')}")
+                st.write(f"**warning:** {_raw_data.get('warning', '(key not present)')}")
+                st.write(f"**request_id:** {_raw_data.get('request_id', '(key not present)')}")
+
+                _response_field = _raw_data.get("response", {})
+                if isinstance(_response_field, dict):
+                    st.write(f"**response keys:** {sorted(_response_field.keys())}")
+                    st.write(f"**shop_name:** {_response_field.get('shop_name', '(key not present in response)')}")
+                else:
+                    st.write(f"**response (unexpected type):** {type(_response_field).__name__}")
             except Exception as e:
-                st.error(f"❌ get_shop_info() failed: {type(e).__name__}: {e}")
+                st.error(f"❌ Raw Shop Info diagnostic failed: {type(e).__name__}: {e}")
         # ----------------------------------------------------------------
         # END TEMPORARY — Test Shop Info diagnostic
         # ----------------------------------------------------------------
