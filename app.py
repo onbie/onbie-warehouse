@@ -531,6 +531,29 @@ with st.sidebar:
                     st.error(_message)
 
         # ----------------------------------------------------------------
+        # TEMPORARY — Test Shop Info diagnostic, remove once get_shop_info()
+        # is confirmed working. Calls shopee_api.get_shop_info() directly
+        # (NOT through _get_shopee_shop_name() — this is a separate,
+        # unrelated diagnostic call so it doesn't touch or depend on the
+        # existing cached shop-name logic at all). Only shows
+        # success/error, exception type+message, top-level response keys,
+        # and shop_name if present — never the full response, never any
+        # token/secret/signature.
+        # ----------------------------------------------------------------
+        if st.button("🧪 Test Shop Info", key="btn_test_shop_info"):
+            try:
+                import shopee_api as _shopee_api_shop_test
+                _shop_info_resp = _shopee_api_shop_test.get_shop_info()
+                st.success("✅ get_shop_info() call succeeded")
+                st.write(f"**Top-level response keys:** {sorted(_shop_info_resp.keys())}")
+                st.write(f"**shop_name:** {_shop_info_resp.get('shop_name', '(key not present in response)')}")
+            except Exception as e:
+                st.error(f"❌ get_shop_info() failed: {type(e).__name__}: {e}")
+        # ----------------------------------------------------------------
+        # END TEMPORARY — Test Shop Info diagnostic
+        # ----------------------------------------------------------------
+
+        # ----------------------------------------------------------------
         # END Phase 1
         # ----------------------------------------------------------------
 
