@@ -143,7 +143,7 @@ def _handle_shopee_oauth():
 _handle_shopee_oauth()
 
 
-def adapt_shopee_api_to_df(orders_with_detail):
+def adapt_shopee_api_to_df(orders_with_detail, shop_name=""):
     """Convert get_orders_with_detail() output into a DataFrame matching
     the column shape the existing packing UI expects (same as orders_master.csv).
 
@@ -153,6 +153,17 @@ def adapt_shopee_api_to_df(orders_with_detail):
     shipping_carrier, and package_list (tracking_number) were added next
     and are also mapped below; any other optional field not yet requested
     in detail_optional_fields is left as an empty string.
+
+    Args:
+        orders_with_detail: list of raw order-detail dicts from
+            get_orders_with_detail().
+        shop_name: the connected shop's real name, from
+            shopee_api.get_shop_info()'s "shop_name" field (fetched once
+            per sync — see _get_shopee_shop_name() below). This is NOT
+            part of the order-detail response itself (Shopee has no
+            reason to echo your own shop's name back to you per-order),
+            so it's passed in separately and applied to every row's
+            "Toko" here. Defaults to "" if not available/fetched yet.
 
     Status mapping (Shopee API → internal packing status):
         READY_TO_SHIP → "Perlu Dikirim"   (packable)
@@ -222,6 +233,7 @@ def adapt_shopee_api_to_df(orders_with_detail):
                 "Catatan dari Pembeli": catatan_pembeli,
                 "Status Pesanan":    status,
                 "Platform":          "Shopee",
+                "Toko":              shop_name,
                 "Sumber":            "Shopee API",
                 "Jumlah":            0,
             })
@@ -244,6 +256,7 @@ def adapt_shopee_api_to_df(orders_with_detail):
                     "Jumlah":            int(item.get("model_quantity_purchased", 0) or 0),
                     "Status Pesanan":    status,
                     "Platform":          "Shopee",
+                    "Toko":              shop_name,
                     "Sumber":            "Shopee API",
                 })
                 rows.append(row)
@@ -257,6 +270,27 @@ def adapt_shopee_api_to_df(orders_with_detail):
 # function, so there's only ever one place that talks to the Shopee API for
 # this purpose (no duplicated fetch/dedup logic).
 SHOPEE_AUTO_SYNC_INTERVAL_SECONDS = 5 * 60
+
+
+def _get_shopee_shop_name():
+    """Fetch and cache the connected shop's real name via
+    shopee_api.get_shop_info() (GET /api/v2/shop/get_shop_info), so "Toko"
+    reflects the actual shop instead of staying blank. The shop name
+    doesn't change between orders/syncs, so this is cached in
+    st.session_state and only re-fetched if not yet cached or a previous
+    attempt failed — not fetched on every sync.
+    """
+    if st.session_state.get("_shopee_shop_name"):
+        return st.session_state["_shopee_shop_name"]
+    try:
+        import shopee_api as _shopee_api_shop
+        info = _shopee_api_shop.get_shop_info()
+        shop_name = str(info.get("shop_name", "") or "").strip()
+        if shop_name:
+            st.session_state["_shopee_shop_name"] = shop_name
+        return shop_name
+    except Exception:
+        return ""
 
 
 def _sync_shopee_orders_now():
@@ -298,7 +332,7 @@ def _sync_shopee_orders_now():
             if _sn not in _seen:
                 _seen.add(_sn)
                 _raw_orders.append(_o)
-        _synced_df = adapt_shopee_api_to_df(_raw_orders)
+        _synced_df = adapt_shopee_api_to_df(_raw_orders, shop_name=_get_shopee_shop_name())
         os.makedirs("data", exist_ok=True)
         _synced_df.to_csv(SHOPEE_DATA_FILE, index=False)
         st.session_state["shopee_orders_df"] = _synced_df

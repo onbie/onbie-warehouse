@@ -44,6 +44,7 @@ SHOPEE_HOST = "https://partner.shopeemobile.com"
 ORDER_LIST_PATH   = "/api/v2/order/get_order_list"
 ORDER_DETAIL_PATH = "/api/v2/order/get_order_detail"
 LOGISTICS_TRACKING_NUMBER_PATH = "/api/v2/logistics/get_tracking_number"
+SHOP_INFO_PATH = "/api/v2/shop/get_shop_info"
 
 # Maximum orders per page allowed by Shopee v2.
 ORDER_LIST_PAGE_SIZE = 100
@@ -552,12 +553,7 @@ def get_order_detail(
             len(order_sn_list),
         )
 
-        # GET endpoint: order_sn_list is sent as a comma-joined plain string,
-        # e.g. "ORDER_SN_A" for one order, "ORDER_SN_A,ORDER_SN_B" for two.
-        # Do NOT use json.dumps() — Shopee expects plain string, not a JSON array.
-        params = {
-            "order_sn_list": ",".join(batch),
-        }
+        params = {"order_sn_list": ",".join(batch)}
         if fields:
             params["response_optional_fields"] = ",".join(fields)
 
@@ -588,6 +584,23 @@ def get_order_detail(
 def get_tracking_number(order_sn: str, package_number: Optional[str] = None) -> Dict:
     """Retrieve the actual carrier tracking number (AWB) for an order via
     GET /api/v2/logistics/get_tracking_number.
+
+    This is a separate call from get_order_detail(): package_list from
+    get_order_detail() only carries package_number (Shopee's internal
+    package identifier), not the AWB itself. This is the endpoint that
+    returns the real tracking number.
+
+    Args:
+        order_sn:       Shopee order serial number. Required.
+        package_number: Required by Shopee when the order has more than one
+                         package; optional otherwise. Only sent if non-empty.
+
+    Returns:
+        The "response" sub-dict from Shopee's JSON body, unwrapped by
+        _shopee_get() the same way as every other call in this module.
+
+    Raises:
+        RuntimeError, ValueError, requests.* — see _shopee_get().
     """
     params = {"order_sn": order_sn}
     if package_number:
@@ -599,6 +612,30 @@ def get_tracking_number(order_sn: str, package_number: Optional[str] = None) -> 
     )
 
     return _shopee_get(LOGISTICS_TRACKING_NUMBER_PATH, params)
+
+
+# ---------------------------------------------------------------------------
+# Shop info
+# ---------------------------------------------------------------------------
+
+def get_shop_info() -> Dict:
+    """Retrieve the connected shop's own info (including its real shop
+    name) via GET /api/v2/shop/get_shop_info.
+
+    No parameters beyond the standard auth ones _shopee_get() already
+    attaches (partner_id, timestamp, sign, access_token, shop_id) — this
+    endpoint just describes the shop tied to the current access_token.
+
+    Returns:
+        The "response" sub-dict from Shopee's JSON body, unwrapped by
+        _shopee_get() the same way as every other call in this module.
+        Expected to include a "shop_name" field among others.
+
+    Raises:
+        RuntimeError, ValueError, requests.* — see _shopee_get().
+    """
+    logger.info("get_shop_info: fetching connected shop info")
+    return _shopee_get(SHOP_INFO_PATH, {})
 
 
 # ---------------------------------------------------------------------------
