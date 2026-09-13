@@ -15,7 +15,7 @@ SNAPSHOT_FILE = "packed_snapshots.csv"
 SNAPSHOT_COLUMNS = [
     "order_number", "packed_at", "No. Pesanan", "Username (Pembeli)",
     "Nama Penerima", "Platform", "Toko", "Provinsi", "Kota/Kabupaten",
-    "Antar ke counter/ pick-up", "Nama Variasi", "Jumlah",
+    "Antar ke counter/ pick-up", "Ekspedisi", "Nama Variasi", "Jumlah",
 ]
 
 # ---- Shopee OAuth callback handler ----
@@ -167,9 +167,13 @@ def adapt_shopee_api_to_df(orders_with_detail, shop_name="", channel_service_typ
         channel_service_types: dict of {logistics_channel_id:
             service_type_identifier}, from shopee_api.get_channel_list()
             (fetched once per sync — see _get_shopee_channel_service_types()
-            below). Used to derive "Antar ke counter/ pick-up" from each
-            order's package_list — never hardcoded. Defaults to None,
-            in which case every row falls back to "Antar ke counter".
+            below). Used to derive "Antar ke counter/ pick-up" (the
+            fulfillment method: "Jemput / Pick-up" vs "Antar ke counter")
+            from each order's package_list — never hardcoded. Defaults to
+            None, in which case every row falls back to "Antar ke counter".
+            This is separate from "Ekspedisi", which is simply the raw
+            shipping_carrier value (e.g. "SPX Sameday", "SPX Hemat") — the
+            courier/service name, not the pickup-vs-dropoff method.
 
     Status mapping (Shopee API → internal packing status):
         READY_TO_SHIP → "Perlu Dikirim"   (packable)
@@ -192,7 +196,7 @@ def adapt_shopee_api_to_df(orders_with_detail, shop_name="", channel_service_typ
         "Kota/Kabupaten", "Provinsi", "SKU Induk", "Nama Produk", "Nama Barang",
         "Nama Variasi", "Jumlah", "Berat (Kg)", "Status Pesanan",
         "Waktu Pesanan Dibuat", "Tenggat Pengiriman", "Antar ke counter/ pick-up",
-        "Catatan dari Pembeli", "Platform", "Toko", "Sumber",
+        "Ekspedisi", "Catatan dari Pembeli", "Platform", "Toko", "Sumber",
     ]
 
     rows = []
@@ -209,6 +213,7 @@ def adapt_shopee_api_to_df(orders_with_detail, shop_name="", channel_service_typ
         kota             = str(recipient.get("city", "") or "")
         provinsi         = str(recipient.get("state", "") or "")
         catatan_pembeli  = str(order.get("note", "") or "")
+        ekspedisi        = str(order.get("shipping_carrier", "") or "")
 
         # Tracking number lives per-package (an order can be split into
         # multiple packages/tracking numbers). We only have one "No. Resi"
@@ -248,6 +253,7 @@ def adapt_shopee_api_to_df(orders_with_detail, shop_name="", channel_service_typ
                 "Kota/Kabupaten":    kota,
                 "Provinsi":          provinsi,
                 "Antar ke counter/ pick-up": metode_kirim,
+                "Ekspedisi":         ekspedisi,
                 "Catatan dari Pembeli": catatan_pembeli,
                 "Status Pesanan":    status,
                 "Platform":          "Shopee",
@@ -266,6 +272,7 @@ def adapt_shopee_api_to_df(orders_with_detail, shop_name="", channel_service_typ
                     "Kota/Kabupaten":    kota,
                     "Provinsi":          provinsi,
                     "Antar ke counter/ pick-up": metode_kirim,
+                    "Ekspedisi":         ekspedisi,
                     "Catatan dari Pembeli": catatan_pembeli,
                     "SKU Induk":         str(item.get("item_sku", "") or ""),
                     "Nama Produk":       str(item.get("item_name", "") or ""),
@@ -673,7 +680,7 @@ def load_shopee_orders():
         "Kota/Kabupaten", "Provinsi", "SKU Induk", "Nama Produk", "Nama Barang",
         "Nama Variasi", "Jumlah", "Berat (Kg)", "Status Pesanan",
         "Waktu Pesanan Dibuat", "Tenggat Pengiriman", "Antar ke counter/ pick-up",
-        "Catatan dari Pembeli", "Platform", "Toko", "Sumber",
+        "Ekspedisi", "Catatan dari Pembeli", "Platform", "Toko", "Sumber",
     ]
     if not os.path.exists(SHOPEE_DATA_FILE):
         return pd.DataFrame(columns=_COLS)
@@ -736,6 +743,7 @@ def save_packed_snapshot(order_number, order_rows, packed_at):
         "Provinsi": order_rows.get("Provinsi", "-"),
         "Kota/Kabupaten": order_rows.get("Kota/Kabupaten", "-"),
         "Antar ke counter/ pick-up": order_rows.get("Antar ke counter/ pick-up", "-"),
+        "Ekspedisi": order_rows.get("Ekspedisi", "-"),
         "Nama Variasi": order_rows.get("Nama Variasi", "-"),
         "Jumlah": order_rows.get("Jumlah", 0),
     })
@@ -1148,9 +1156,10 @@ else:
             "Toko": "Shop",
             "Kota/Kabupaten": "Kabupaten/Kota",
             "Antar ke counter/ pick-up": "Shipping",
+            "Ekspedisi": "Ekspedisi",
             "Nama Variasi": "Variant",
             "Jumlah": "Qty",
-        })[["Order Number", "Username", "Recipient", "Platform", "Shop", "Kabupaten/Kota", "Shipping", "Variant", "Qty"]]
+        })[["Order Number", "Username", "Recipient", "Platform", "Shop", "Kabupaten/Kota", "Shipping", "Ekspedisi", "Variant", "Qty"]]
 
         styled_belum_df = belum_display_df
         st.dataframe(
@@ -1192,7 +1201,7 @@ else:
         st.write(f"**{len(today_order_numbers)} order** sudah di-pack hari ini ({today_str})")
 
         report_df = report_rows[
-            ["No. Pesanan", "Username (Pembeli)", "Nama Penerima", "Platform", "Toko", "Kota/Kabupaten", "Antar ke counter/ pick-up", "Nama Variasi", "Jumlah"]
+            ["No. Pesanan", "Username (Pembeli)", "Nama Penerima", "Platform", "Toko", "Kota/Kabupaten", "Antar ke counter/ pick-up", "Ekspedisi", "Nama Variasi", "Jumlah"]
         ].copy()
 
         styled_report_df = report_df.rename(columns={
@@ -1203,6 +1212,7 @@ else:
             "Toko": "Shop",
             "Kota/Kabupaten": "Kabupaten/Kota",
             "Antar ke counter/ pick-up": "Shipping",
+            "Ekspedisi": "Ekspedisi",
             "Nama Variasi": "Variant",
             "Jumlah": "Qty"
         })
@@ -1214,11 +1224,11 @@ else:
 
         # Build printable daily report HTML — order-level columns (No.
         # Pesanan, Username, Nama Penerima, Platform, Toko, Kabupaten/Kota,
-        # Antar ke counter/pick-up) merged via rowspan across consecutive
-        # rows of the same order; Variasi, Qty, Keterangan stay on every
-        # row. Now built via the same shared build_rowspan_rows_html() the
-        # on-screen table above uses, with its own print-oriented CSS below
-        # (Arial/white, separate from the on-screen dark styling).
+        # Antar ke counter/pick-up, Ekspedisi) merged via rowspan across
+        # consecutive rows of the same order; Variasi, Qty, Keterangan stay
+        # on every row. Now built via the same shared build_rowspan_rows_html()
+        # the on-screen table above uses, with its own print-oriented CSS
+        # below (Arial/white, separate from the on-screen dark styling).
         _report_rows_for_print = report_rows.copy()
         _report_rows_for_print["Jumlah"] = _report_rows_for_print["Jumlah"].apply(
             lambda v: int(v) if pd.notna(v) else 0
@@ -1226,7 +1236,7 @@ else:
         report_table_rows = build_rowspan_rows_html(
             _report_rows_for_print,
             group_col="No. Pesanan",
-            merge_cols=["No. Pesanan", "Username (Pembeli)", "Nama Penerima", "Platform", "Toko", "Kota/Kabupaten", "Antar ke counter/ pick-up"],
+            merge_cols=["No. Pesanan", "Username (Pembeli)", "Nama Penerima", "Platform", "Toko", "Kota/Kabupaten", "Antar ke counter/ pick-up", "Ekspedisi"],
             other_cols=["Nama Variasi", "Jumlah"],
             blank_cols=["Keterangan"],
         )
@@ -1255,7 +1265,7 @@ else:
             <p class="summary"><b>Di-pack hari ini: {len(today_order_numbers)} order</b></p>
             <table>
                 <tr>
-                    <th>No. Pesanan</th><th>Username</th><th>Nama Penerima</th><th>Platform</th><th>Toko</th><th>Kabupaten/Kota</th><th>Nama Logistik</th><th>Variasi</th><th>Qty</th><th>Keterangan</th>
+                    <th>No. Pesanan</th><th>Username</th><th>Nama Penerima</th><th>Platform</th><th>Toko</th><th>Kabupaten/Kota</th><th>Nama Logistik</th><th>Ekspedisi</th><th>Variasi</th><th>Qty</th><th>Keterangan</th>
                 </tr>
                 {report_table_rows}
             </table>
