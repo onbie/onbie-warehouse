@@ -143,16 +143,16 @@ def _handle_shopee_oauth():
 _handle_shopee_oauth()
 
 
-def adapt_shopee_api_to_df(orders_with_detail, shop_name=""):
+def adapt_shopee_api_to_df(orders_with_detail, shop_name="", channel_service_types=None):
     """Convert get_orders_with_detail() output into a DataFrame matching
     the column shape the existing packing UI expects (same as orders_master.csv).
 
     One row per product item — mirrors the EasyBoss multi-row structure.
     Only confirmed-working Shopee API fields are mapped. recipient_address
-    and buyer_username are confirmed and mapped below. note,
-    shipping_carrier, and package_list (tracking_number) were added next
-    and are also mapped below; any other optional field not yet requested
-    in detail_optional_fields is left as an empty string.
+    and buyer_username are confirmed and mapped below. note and
+    package_list (tracking_number, fulfillment method) were added next and
+    are also mapped below; any other optional field not yet requested in
+    detail_optional_fields is left as an empty string.
 
     Args:
         orders_with_detail: list of raw order-detail dicts from
@@ -164,6 +164,12 @@ def adapt_shopee_api_to_df(orders_with_detail, shop_name=""):
             reason to echo your own shop's name back to you per-order),
             so it's passed in separately and applied to every row's
             "Toko" here. Defaults to "" if not available/fetched yet.
+        channel_service_types: dict of {logistics_channel_id:
+            service_type_identifier}, from shopee_api.get_channel_list()
+            (fetched once per sync — see _get_shopee_channel_service_types()
+            below). Used to derive "Antar ke counter/ pick-up" from each
+            order's package_list — never hardcoded. Defaults to None,
+            in which case every row falls back to "Antar ke counter".
 
     Status mapping (Shopee API → internal packing status):
         READY_TO_SHIP → "Perlu Dikirim"   (packable)
@@ -203,7 +209,6 @@ def adapt_shopee_api_to_df(orders_with_detail, shop_name=""):
         kota             = str(recipient.get("city", "") or "")
         provinsi         = str(recipient.get("state", "") or "")
         catatan_pembeli  = str(order.get("note", "") or "")
-        metode_kirim     = str(order.get("shipping_carrier", "") or "")
 
         # Tracking number lives per-package (an order can be split into
         # multiple packages/tracking numbers). We only have one "No. Resi"
@@ -219,6 +224,19 @@ def adapt_shopee_api_to_df(orders_with_detail, shop_name=""):
                 if tracking:
                     no_resi = tracking
                     break
+
+        # Fulfillment method ("Antar ke counter" vs "Jemput / Pick-up") is
+        # derived from the first package's logistics_channel_id, looked up
+        # against channel_service_types (from shopee_api.get_channel_list()
+        # — never hardcoded). same_day/instant service types mean the
+        # courier picks up from the seller; anything else (including an
+        # unrecognized/missing channel id) defaults to counter drop-off.
+        metode_kirim = "Antar ke counter"
+        if isinstance(package_list, list) and package_list and isinstance(package_list[0], dict):
+            channel_id = package_list[0].get("logistics_channel_id")
+            service_type = (channel_service_types or {}).get(channel_id, "")
+            if service_type in ("same_day", "instant"):
+                metode_kirim = "Jemput / Pick-up"
 
         if not item_list:
             rows.append({c: "" for c in _COLS})
@@ -293,6 +311,36 @@ def _get_shopee_shop_name():
         return ""
 
 
+def _get_shopee_channel_service_types():
+    """Fetch and cache a {logistics_channel_id: service_type_identifier}
+    map via shopee_api.get_channel_list() (GET
+    /api/v2/logistics/get_channel_list), so the fulfillment method
+    ("Antar ke counter" vs "Jemput / Pick-up") can be derived per-package
+    without ever hardcoding a channel ID. The shop's enabled channels
+    rarely change, so this is cached in st.session_state the same way
+    _get_shopee_shop_name() is — only re-fetched if not yet cached or a
+    previous attempt failed.
+    """
+    if st.session_state.get("_shopee_channel_service_types"):
+        return st.session_state["_shopee_channel_service_types"]
+    try:
+        import shopee_api as _shopee_api_channels
+        info = _shopee_api_channels.get_channel_list()
+        channel_list = info.get("logistics_channel_list", [])
+        if not isinstance(channel_list, list):
+            channel_list = []
+        channel_map = {
+            ch.get("logistics_channel_id"): str(ch.get("service_type_identifier", "") or "")
+            for ch in channel_list
+            if isinstance(ch, dict) and ch.get("logistics_channel_id") is not None
+        }
+        if channel_map:
+            st.session_state["_shopee_channel_service_types"] = channel_map
+        return channel_map
+    except Exception:
+        return {}
+
+
 def _sync_shopee_orders_now():
     """Fetch READY_TO_SHIP + PROCESSED orders from Shopee, dedupe by
     order_sn (keep first occurrence), and refresh the packing queue —
@@ -332,7 +380,11 @@ def _sync_shopee_orders_now():
             if _sn not in _seen:
                 _seen.add(_sn)
                 _raw_orders.append(_o)
-        _synced_df = adapt_shopee_api_to_df(_raw_orders, shop_name=_get_shopee_shop_name())
+        _synced_df = adapt_shopee_api_to_df(
+            _raw_orders,
+            shop_name=_get_shopee_shop_name(),
+            channel_service_types=_get_shopee_channel_service_types(),
+        )
         os.makedirs("data", exist_ok=True)
         _synced_df.to_csv(SHOPEE_DATA_FILE, index=False)
         st.session_state["shopee_orders_df"] = _synced_df
@@ -529,352 +581,6 @@ with st.sidebar:
                     st.success(_message)
                 else:
                     st.error(_message)
-
-        # ----------------------------------------------------------------
-        # TEMPORARY — Test Shop Info diagnostic, remove once get_shop_info()
-        # is confirmed working. Makes its own raw signed request (reusing
-        # existing shopee_auth/shopee_api helper functions for token +
-        # signature — no auth/signing logic duplicated or changed) instead
-        # of calling shopee_api.get_shop_info(), because get_shop_info()
-        # only returns data["response"] — _shopee_get() discards the
-        # top-level "error"/"message"/"warning" fields before returning,
-        # so they're otherwise invisible to any caller. This diagnostic
-        # inspects the full raw JSON body one level deeper than
-        # get_shop_info() can. Does not touch or depend on the existing
-        # cached shop-name logic (_get_shopee_shop_name()) at all. Only
-        # shows key names and a few known-safe fields (error, message,
-        # warning, shop_name) — never the full response, never any
-        # token/secret/signature.
-        # ----------------------------------------------------------------
-        if st.button("🧪 Test Shop Info", key="btn_test_shop_info"):
-            try:
-                import shopee_api as _shopee_api_shop_test
-                import shopee_auth as _shopee_auth_shop_test
-                import requests as _requests_shop_test
-                import time as _time_shop_test
-
-                _access_token = _shopee_auth_shop_test.get_valid_access_token()
-                _tokens = _shopee_auth_shop_test.load_tokens()
-                _shop_id = int(_tokens.get("shop_id", 0)) if _tokens else 0
-                _partner_id, _partner_key = _shopee_auth_shop_test.get_credentials()
-                _timestamp = int(_time_shop_test.time())
-                _sign = _shopee_api_shop_test._generate_protected_signature(
-                    _partner_id, _shopee_api_shop_test.SHOP_INFO_PATH,
-                    _timestamp, _access_token, _shop_id, _partner_key,
-                )
-                _query_params = {
-                    "partner_id":   _partner_id,
-                    "timestamp":    _timestamp,
-                    "sign":         _sign,
-                    "access_token": _access_token,
-                    "shop_id":      _shop_id,
-                }
-                _url = f"{_shopee_api_shop_test.SHOPEE_HOST}{_shopee_api_shop_test.SHOP_INFO_PATH}"
-                _raw_resp = _requests_shop_test.get(_url, params=_query_params, timeout=15)
-                _raw_data = _raw_resp.json()
-
-                st.success(f"✅ Raw HTTP status: {_raw_resp.status_code}")
-                st.write(f"**Top-level keys:** {sorted(_raw_data.keys())}")
-                st.write(f"**error:** {_raw_data.get('error', '(key not present)')}")
-                st.write(f"**message:** {_raw_data.get('message', '(key not present)')}")
-                st.write(f"**warning:** {_raw_data.get('warning', '(key not present)')}")
-                st.write(f"**request_id:** {_raw_data.get('request_id', '(key not present)')}")
-
-                _response_field = _raw_data.get("response", {})
-                if isinstance(_response_field, dict):
-                    st.write(f"**response keys:** {sorted(_response_field.keys())}")
-                    st.write(f"**shop_name:** {_response_field.get('shop_name', '(key not present in response)')}")
-                else:
-                    st.write(f"**response (unexpected type):** {type(_response_field).__name__}")
-            except Exception as e:
-                st.error(f"❌ Raw Shop Info diagnostic failed: {type(e).__name__}: {e}")
-        # ----------------------------------------------------------------
-        # END TEMPORARY — Test Shop Info diagnostic
-        # ----------------------------------------------------------------
-
-        # ----------------------------------------------------------------
-        # TEMPORARY — Test Shipping Parameter diagnostic. Calls GET
-        # /api/v2/logistics/get_shipping_parameter for the first order in
-        # the current packing queue (st.session_state["shopee_orders_df"]),
-        # using its "No. Pesanan" as order_sn — no new API call to fetch an
-        # order, reuses what's already synced. Makes its own raw signed
-        # request the same way the Test Shop Info diagnostic does, reusing
-        # existing shopee_auth/shopee_api helper functions for token +
-        # signature (no auth/signing logic duplicated or changed, and
-        # shopee_api.py itself is not modified). Any key whose name looks
-        # like a token/secret/signature is redacted before display, as a
-        # safety net; everything else (including the full response) is
-        # shown as-is per this diagnostic's scope.
-        # ----------------------------------------------------------------
-        def _redact_sensitive_diag(obj):
-            """Recursively redact any dict key that looks like a
-            token/secret/signature, anywhere in the structure."""
-            _sensitive_key_substrings = ("token", "secret", "sign", "partner_key", "password")
-            if isinstance(obj, dict):
-                return {
-                    k: ("<redacted>" if any(s in str(k).lower() for s in _sensitive_key_substrings)
-                        else _redact_sensitive_diag(v))
-                    for k, v in obj.items()
-                }
-            if isinstance(obj, list):
-                return [_redact_sensitive_diag(v) for v in obj]
-            return obj
-
-        if st.button("🧪 Test Shipping Parameter", key="btn_test_shipping_parameter"):
-            _orders_df_for_ship_test = st.session_state.get("shopee_orders_df")
-            if _orders_df_for_ship_test is None or _orders_df_for_ship_test.empty:
-                st.warning("Belum ada order Shopee di packing queue. Klik Sync Now dulu.")
-            else:
-                _ship_test_order_sn = str(_orders_df_for_ship_test.iloc[0]["No. Pesanan"]).strip()
-                st.caption(f"Testing order_sn: {_ship_test_order_sn}")
-                try:
-                    import shopee_api as _shopee_api_ship_test
-                    import shopee_auth as _shopee_auth_ship_test
-                    import requests as _requests_ship_test
-                    import time as _time_ship_test
-
-                    _access_token = _shopee_auth_ship_test.get_valid_access_token()
-                    _tokens = _shopee_auth_ship_test.load_tokens()
-                    _shop_id = int(_tokens.get("shop_id", 0)) if _tokens else 0
-                    _partner_id, _partner_key = _shopee_auth_ship_test.get_credentials()
-                    _timestamp = int(_time_ship_test.time())
-                    _shipping_param_path = "/api/v2/logistics/get_shipping_parameter"
-                    _sign = _shopee_api_ship_test._generate_protected_signature(
-                        _partner_id, _shipping_param_path, _timestamp,
-                        _access_token, _shop_id, _partner_key,
-                    )
-                    _query_params = {
-                        "partner_id":   _partner_id,
-                        "timestamp":    _timestamp,
-                        "sign":         _sign,
-                        "access_token": _access_token,
-                        "shop_id":      _shop_id,
-                        "order_sn":     _ship_test_order_sn,
-                    }
-                    _url = f"{_shopee_api_ship_test.SHOPEE_HOST}{_shipping_param_path}"
-                    _raw_resp = _requests_ship_test.get(_url, params=_query_params, timeout=15)
-                    _raw_data = _raw_resp.json()
-
-                    st.success(f"✅ Raw HTTP status: {_raw_resp.status_code}")
-                    st.write(f"**Top-level keys:** {sorted(_raw_data.keys())}")
-                    st.write(f"**error:** {_raw_data.get('error', '(key not present)')}")
-                    st.write(f"**message:** {_raw_data.get('message', '(key not present)')}")
-                    st.write(f"**request_id:** {_raw_data.get('request_id', '(key not present)')}")
-
-                    _ship_response_field = _raw_data.get("response", {})
-                    if isinstance(_ship_response_field, dict):
-                        st.write(f"**response keys:** {sorted(_ship_response_field.keys())}")
-                    else:
-                        st.write(f"**response (unexpected type):** {type(_ship_response_field).__name__}")
-
-                    st.write("**Full response (tokens/secrets/signatures redacted if present):**")
-                    st.json(_redact_sensitive_diag(_raw_data))
-                except Exception as e:
-                    st.error(f"❌ Shipping Parameter diagnostic failed: {type(e).__name__}: {e}")
-        # ----------------------------------------------------------------
-        # END TEMPORARY — Test Shipping Parameter diagnostic
-        # ----------------------------------------------------------------
-
-        # ----------------------------------------------------------------
-        # TEMPORARY — Test Tracking Info diagnostic. Calls GET
-        # /api/v2/logistics/get_tracking_info for the first order in the
-        # current packing queue (st.session_state["shopee_orders_df"]),
-        # using its "No. Pesanan" as order_sn — no new API call to fetch an
-        # order, reuses what's already synced.
-        #
-        # package_number: NOT included. It isn't present anywhere in the
-        # currently mapped order data — adapt_shopee_api_to_df() only ever
-        # extracts package_list[].tracking_number (for "No. Resi") and
-        # discards package_number itself; it was never stored as a column
-        # in orders_df/shopee_orders_df. Sending a fabricated value would
-        # violate "do not guess," so this only sends order_sn. If Shopee
-        # requires package_number for this specific order, that will show
-        # up directly in this diagnostic's own error/message output below.
-        #
-        # Reuses existing shopee_auth/shopee_api helper functions for
-        # token + signature (no auth/signing logic duplicated or changed);
-        # shopee_api.py and production packing logic are not modified.
-        # ----------------------------------------------------------------
-        if st.button("🧪 Test Tracking Info", key="btn_test_tracking_info"):
-            _orders_df_for_track_test = st.session_state.get("shopee_orders_df")
-            if _orders_df_for_track_test is None or _orders_df_for_track_test.empty:
-                st.warning("Belum ada order Shopee di packing queue. Klik Sync Now dulu.")
-            else:
-                _track_test_order_sn = str(_orders_df_for_track_test.iloc[0]["No. Pesanan"]).strip()
-                st.caption(f"Testing order_sn: {_track_test_order_sn}")
-                st.caption("package_number: not available in existing order data — omitted, not guessed.")
-                try:
-                    import shopee_api as _shopee_api_track_test
-                    import shopee_auth as _shopee_auth_track_test
-                    import requests as _requests_track_test
-                    import time as _time_track_test
-
-                    _access_token = _shopee_auth_track_test.get_valid_access_token()
-                    _tokens = _shopee_auth_track_test.load_tokens()
-                    _shop_id = int(_tokens.get("shop_id", 0)) if _tokens else 0
-                    _partner_id, _partner_key = _shopee_auth_track_test.get_credentials()
-                    _timestamp = int(_time_track_test.time())
-                    _tracking_info_path = "/api/v2/logistics/get_tracking_info"
-                    _sign = _shopee_api_track_test._generate_protected_signature(
-                        _partner_id, _tracking_info_path, _timestamp,
-                        _access_token, _shop_id, _partner_key,
-                    )
-                    _query_params = {
-                        "partner_id":   _partner_id,
-                        "timestamp":    _timestamp,
-                        "sign":         _sign,
-                        "access_token": _access_token,
-                        "shop_id":      _shop_id,
-                        "order_sn":     _track_test_order_sn,
-                    }
-                    _url = f"{_shopee_api_track_test.SHOPEE_HOST}{_tracking_info_path}"
-                    _raw_resp = _requests_track_test.get(_url, params=_query_params, timeout=15)
-                    _raw_data = _raw_resp.json()
-
-                    st.success(f"✅ Raw HTTP status: {_raw_resp.status_code}")
-                    st.write(f"**Top-level keys:** {sorted(_raw_data.keys())}")
-                    st.write(f"**error:** {_raw_data.get('error', '(key not present)')}")
-                    st.write(f"**message:** {_raw_data.get('message', '(key not present)')}")
-                    st.write(f"**request_id:** {_raw_data.get('request_id', '(key not present)')}")
-
-                    _track_response_field = _raw_data.get("response", {})
-                    if isinstance(_track_response_field, dict):
-                        st.write(f"**response keys:** {sorted(_track_response_field.keys())}")
-                    else:
-                        st.write(f"**response (unexpected type):** {type(_track_response_field).__name__}")
-
-                    st.write("**Full response (tokens/secrets/signatures redacted if present):**")
-                    st.json(_redact_sensitive_diag(_raw_data))
-                except Exception as e:
-                    st.error(f"❌ Tracking Info diagnostic failed: {type(e).__name__}: {e}")
-        # ----------------------------------------------------------------
-        # END TEMPORARY — Test Tracking Info diagnostic
-        # ----------------------------------------------------------------
-
-        # ----------------------------------------------------------------
-        # TEMPORARY — Test Package List diagnostic. Fetches the first
-        # order in the current packing queue's raw package_list by calling
-        # the existing shopee_api.get_order_detail() directly (the same
-        # production function _sync_shopee_orders_now() already uses) with
-        # response_optional_fields=["package_list"] — reusing the real
-        # order-detail/auth logic as-is, no raw request built by hand here.
-        # Does not modify shopee_api.py or any production packing logic;
-        # this is a read-only diagnostic call.
-        # ----------------------------------------------------------------
-        if st.button("🧪 Test Package List", key="btn_test_package_list"):
-            _orders_df_for_pkg_test = st.session_state.get("shopee_orders_df")
-            if _orders_df_for_pkg_test is None or _orders_df_for_pkg_test.empty:
-                st.warning("Belum ada order Shopee di packing queue. Klik Sync Now dulu.")
-            else:
-                _pkg_test_order_sn = str(_orders_df_for_pkg_test.iloc[0]["No. Pesanan"]).strip()
-                st.caption(f"Testing order_sn: {_pkg_test_order_sn}")
-                try:
-                    import shopee_api as _shopee_api_pkg_test
-                    _pkg_test_details = _shopee_api_pkg_test.get_order_detail(
-                        order_sn_list=[_pkg_test_order_sn],
-                        response_optional_fields=["package_list"],
-                    )
-                    if not _pkg_test_details:
-                        st.warning("Tidak ada order detail dikembalikan untuk order_sn ini.")
-                    else:
-                        _pkg_list = _pkg_test_details[0].get("package_list", "(key not present in response)")
-                        st.write(f"**package_list type:** {type(_pkg_list).__name__}")
-                        st.write("**Full package_list (tokens/secrets/signatures redacted if present):**")
-                        st.json(_redact_sensitive_diag(_pkg_list))
-                except Exception as e:
-                    st.error(f"❌ Package List diagnostic failed: {type(e).__name__}: {e}")
-        # ----------------------------------------------------------------
-        # END TEMPORARY — Test Package List diagnostic
-        # ----------------------------------------------------------------
-
-        # ----------------------------------------------------------------
-        # TEMPORARY — Test Channel List diagnostic. Calls GET
-        # /api/v2/logistics/get_channel_list — a shop-level endpoint (no
-        # order_sn needed). Makes its own raw signed request the same way
-        # the Shipping Parameter / Tracking Info diagnostics do, reusing
-        # existing shopee_auth/shopee_api helper functions for token +
-        # signature (no auth/signing logic duplicated or changed, and
-        # shopee_api.py itself is not modified). Looks for the channel
-        # entry with logistics_channel_id == 80045 inside whatever
-        # list-shaped field the response actually uses (commonly
-        # "logistics_channel_list"), rather than assuming the exact key
-        # name — the field name is confirmed from the live response here,
-        # not guessed in advance.
-        # ----------------------------------------------------------------
-        if st.button("🧪 Test Channel List", key="btn_test_channel_list"):
-            try:
-                import shopee_api as _shopee_api_chan_test
-                import shopee_auth as _shopee_auth_chan_test
-                import requests as _requests_chan_test
-                import time as _time_chan_test
-
-                _access_token = _shopee_auth_chan_test.get_valid_access_token()
-                _tokens = _shopee_auth_chan_test.load_tokens()
-                _shop_id = int(_tokens.get("shop_id", 0)) if _tokens else 0
-                _partner_id, _partner_key = _shopee_auth_chan_test.get_credentials()
-                _timestamp = int(_time_chan_test.time())
-                _channel_list_path = "/api/v2/logistics/get_channel_list"
-                _sign = _shopee_api_chan_test._generate_protected_signature(
-                    _partner_id, _channel_list_path, _timestamp,
-                    _access_token, _shop_id, _partner_key,
-                )
-                _query_params = {
-                    "partner_id":   _partner_id,
-                    "timestamp":    _timestamp,
-                    "sign":         _sign,
-                    "access_token": _access_token,
-                    "shop_id":      _shop_id,
-                }
-                _url = f"{_shopee_api_chan_test.SHOPEE_HOST}{_channel_list_path}"
-                _raw_resp = _requests_chan_test.get(_url, params=_query_params, timeout=15)
-                _raw_data = _raw_resp.json()
-
-                st.success(f"✅ Raw HTTP status: {_raw_resp.status_code}")
-                st.write(f"**Top-level keys:** {sorted(_raw_data.keys())}")
-                st.write(f"**error:** {_raw_data.get('error', '(key not present)')}")
-                st.write(f"**message:** {_raw_data.get('message', '(key not present)')}")
-                st.write(f"**request_id:** {_raw_data.get('request_id', '(key not present)')}")
-
-                _chan_response_field = _raw_data.get("response", {})
-                if isinstance(_chan_response_field, dict):
-                    st.write(f"**response keys:** {sorted(_chan_response_field.keys())}")
-
-                    # Find whichever list-shaped field actually holds the
-                    # channel entries — try the commonly-documented key
-                    # first, then fall back to scanning any list value.
-                    _channel_list = _chan_response_field.get("logistics_channel_list")
-                    _channel_list_key = "logistics_channel_list"
-                    if not isinstance(_channel_list, list):
-                        _channel_list = None
-                        for _k, _v in _chan_response_field.items():
-                            if isinstance(_v, list):
-                                _channel_list = _v
-                                _channel_list_key = _k
-                                break
-
-                    if _channel_list is None:
-                        st.warning("Tidak ditemukan field berbentuk list di response ini.")
-                    else:
-                        st.write(f"**Channel list found under key:** `{_channel_list_key}` ({len(_channel_list)} entries)")
-                        _matched_channel = next(
-                            (ch for ch in _channel_list
-                             if isinstance(ch, dict) and ch.get("logistics_channel_id") == 80045),
-                            None,
-                        )
-                        if _matched_channel is None:
-                            st.warning("logistics_channel_id 80045 tidak ditemukan di channel list ini.")
-                            st.write(f"**Available logistics_channel_id values:** "
-                                     f"{[ch.get('logistics_channel_id') for ch in _channel_list if isinstance(ch, dict)]}")
-                        else:
-                            st.write("**Channel 80045 — full entry (tokens/secrets/signatures redacted if present):**")
-                            st.json(_redact_sensitive_diag(_matched_channel))
-                else:
-                    st.write(f"**response (unexpected type):** {type(_chan_response_field).__name__}")
-            except Exception as e:
-                st.error(f"❌ Channel List diagnostic failed: {type(e).__name__}: {e}")
-        # ----------------------------------------------------------------
-        # END TEMPORARY — Test Channel List diagnostic
-        # ----------------------------------------------------------------
 
         # ----------------------------------------------------------------
         # END Phase 1

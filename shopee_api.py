@@ -45,6 +45,7 @@ ORDER_LIST_PATH   = "/api/v2/order/get_order_list"
 ORDER_DETAIL_PATH = "/api/v2/order/get_order_detail"
 LOGISTICS_TRACKING_NUMBER_PATH = "/api/v2/logistics/get_tracking_number"
 SHOP_INFO_PATH = "/api/v2/shop/get_shop_info"
+LOGISTICS_CHANNEL_LIST_PATH = "/api/v2/logistics/get_channel_list"
 
 # Maximum orders per page allowed by Shopee v2.
 ORDER_LIST_PAGE_SIZE = 100
@@ -653,6 +654,32 @@ def get_shop_info() -> Dict:
     """
     logger.info("get_shop_info: fetching connected shop info")
     return _shopee_get(SHOP_INFO_PATH, {}, unwrap_response=False)
+
+
+def get_channel_list() -> Dict:
+    """Retrieve the shop's enabled logistics channels via GET
+    /api/v2/logistics/get_channel_list.
+
+    Used to derive the fulfillment method ("Antar ke counter" vs "Jemput /
+    Pick-up") for a package without ever hardcoding a channel ID: callers
+    look up a package's logistics_channel_id against this list's
+    service_type_identifier per channel.
+
+    No parameters beyond the standard auth ones _shopee_get() already
+    attaches.
+
+    Returns:
+        The "response" sub-dict from Shopee's JSON body, unwrapped by
+        _shopee_get() the same way as get_order_list/get_order_detail/
+        get_tracking_number. Expected to include a
+        "logistics_channel_list" field, each entry carrying at least
+        logistics_channel_id and service_type_identifier.
+
+    Raises:
+        RuntimeError, ValueError, requests.* — see _shopee_get().
+    """
+    logger.info("get_channel_list: fetching shop logistics channels")
+    return _shopee_get(LOGISTICS_CHANNEL_LIST_PATH, {})
 
 
 # ---------------------------------------------------------------------------
