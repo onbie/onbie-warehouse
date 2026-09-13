@@ -689,6 +689,7 @@ def load_shopee_orders():
     return df
 
 
+@st.cache_data
 def load_packed_df():
     if os.path.exists(PACKED_FILE):
         df = pd.read_csv(PACKED_FILE)
@@ -712,6 +713,7 @@ def get_packed_at(order_number):
     return None
 
 
+@st.cache_data
 def load_snapshots_df():
     if os.path.exists(SNAPSHOT_FILE):
         df = pd.read_csv(SNAPSHOT_FILE)
@@ -749,6 +751,7 @@ def save_packed_snapshot(order_number, order_rows, packed_at):
     })
     combined = pd.concat([existing, new_rows], ignore_index=True)
     combined.to_csv(SNAPSHOT_FILE, index=False)
+    load_snapshots_df.clear()  # invalidate cache: file just changed on disk
 
 
 def save_packed_order(order_number, order_rows=None):
@@ -762,6 +765,7 @@ def save_packed_order(order_number, order_rows=None):
         }])
         df = pd.concat([df, new_row], ignore_index=True)
     df.to_csv(PACKED_FILE, index=False)
+    load_packed_df.clear()  # invalidate cache: file just changed on disk
     save_packed_snapshot(order_number, order_rows, packed_at)
 
 
