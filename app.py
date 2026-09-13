@@ -971,6 +971,13 @@ else:
                     quantity = int(product.get('Jumlah', 0)) if pd.notna(product.get('Jumlah')) else 0
                     nama_produk = product.get('Nama Produk', '-')
                     nama_variasi = product.get('Nama Variasi', '-')
+                    sku_induk_html = ""
+                    if "SKU Induk" in results.columns:
+                        sku_induk = product.get('SKU Induk', '-')
+                        sku_induk_html = f"""
+                                <div style="font-size: 13px; color: #888; margin-top: 4px;">
+                                    SKU: {sku_induk}
+                                </div>"""
 
                     st.markdown(
                         f"""
@@ -990,7 +997,7 @@ else:
                                 </div>
                                 <div style="font-size: 16px; color: #555; margin-top: 6px;">
                                     Variasi: <b>{nama_variasi}</b>
-                                </div>
+                                </div>{sku_induk_html}
                             </div>
                             <div style="text-align: center; min-width: 110px;">
                                 <div style="font-size: 13px; color: #888; text-transform: uppercase; letter-spacing: 1px;">
@@ -1026,6 +1033,7 @@ else:
                         st.write(f"**Shop:** {results.iloc[0].get('Toko', '-')}")
                         st.write(f"**Kabupaten/Kota:** {results.iloc[0].get('Kota/Kabupaten', '-')}")
                         st.write(f"**Metode Kirim:** {results.iloc[0].get('Antar ke counter/ pick-up', '-')}")
+                        st.write(f"**Ekspedisi:** {results.iloc[0].get('Ekspedisi', '-')}")
                         st.write(f"**Catatan Pembeli:** {results.iloc[0].get('Catatan dari Pembeli', '-')}")
 
                 # ---- Print this order only ----
@@ -1040,6 +1048,7 @@ else:
                         <td>{row.get('Toko', '-')}</td>
                         <td>{row.get('Kota/Kabupaten', '-')}</td>
                         <td>{row.get('Antar ke counter/ pick-up', '-')}</td>
+                        <td>{row.get('Ekspedisi', '-')}</td>
                         <td>{p.get('Nama Variasi', '-')}</td>
                         <td>{int(p.get('Jumlah', 0)) if pd.notna(p.get('Jumlah')) else 0}</td>
                     </tr>
@@ -1062,7 +1071,7 @@ else:
                 <body onload="window.print()">
                     <h1>📦 Packing Slip</h1>
                     <table>
-                        <tr><th>No. Pesanan</th><th>Username</th><th>Nama Penerima</th><th>Platform</th><th>Toko</th><th>Kota/Kabupaten</th><th>Nama Logistik</th><th>Variasi</th><th>Qty</th></tr>
+                        <tr><th>No. Pesanan</th><th>Username</th><th>Nama Penerima</th><th>Platform</th><th>Toko</th><th>Kota/Kabupaten</th><th>Nama Logistik</th><th>Ekspedisi</th><th>Variasi</th><th>Qty</th></tr>
                         {product_rows_html}
                     </table>
                     <p style="margin-top:24px;font-size:12px;color:#888;">Dicetak: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</p>
