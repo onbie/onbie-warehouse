@@ -4,9 +4,28 @@ import os
 import streamlit.components.v1 as components
 from datetime import datetime
 from zoneinfo import ZoneInfo
+import time  # TEMPORARY: for profiling instrumentation, remove with the rest
 
 st.set_page_config(page_title="Shopee Packing Checker", layout="wide")
 st.title("📦 Shopee Packing Checker")
+
+# ---- TEMPORARY: profiling instrumentation --------------------------------
+# Records wall-clock elapsed time for each named section on THIS rerun only.
+# Displayed at the very end of the script in an expander. Remove this whole
+# block, every _perf_mark(...) call, and the display block at the bottom
+# once profiling is done — none of this affects app behavior, only timing.
+_PERF_LOG = []
+_perf_prev = time.perf_counter()
+
+
+def _perf_mark(section_name):
+    """Record elapsed time since the previous _perf_mark() call (or script
+    start) under section_name. Call this immediately AFTER a section of
+    code finishes."""
+    global _perf_prev
+    _now = time.perf_counter()
+    _PERF_LOG.append((section_name, _now - _perf_prev))
+    _perf_prev = _now
 
 DATA_FILE = "data/orders_master.csv"
 PACKED_FILE = "packed.csv"
@@ -141,6 +160,7 @@ def _handle_shopee_oauth():
         st.error(f"❌ Unexpected error saat OAuth: {e}")
 
 _handle_shopee_oauth()
+_perf_mark("startup_secrets_oauth")
 
 
 def adapt_shopee_api_to_df(orders_with_detail, shop_name="", channel_service_types=None):
@@ -616,6 +636,7 @@ with st.sidebar:
 
     st.divider()
 
+_perf_mark("sidebar_and_auto_sync")
 
 CANCELLED_KEYWORDS = ["batal", "cancel"]
 # Only orders whose status CONTAINS this phrase may be packed
@@ -940,6 +961,8 @@ else:
     if st.session_state.not_found_query:
         big_banner(["❌ ORDER TIDAK DITEMUKAN", "Cek nomor pesanan / nomor resi"], "#b71c1c")
 
+    _perf_mark("search_and_filter")
+
     # ---- Render currently displayed order (persists across reruns) ----
     if st.session_state.displayed_order:
         order_number = st.session_state.displayed_order
@@ -1100,6 +1123,8 @@ else:
     # Keep the scan box focused and ready for the next barcode
     focus_search_box()
 
+    _perf_mark("order_detail_rendering")
+
     # Tighter vertical gap here specifically (search area -> metrics),
     # via a low-margin <hr> instead of st.divider()'s default spacing.
     # Scoped to this one spot only — no global CSS, other dividers/sections
@@ -1181,6 +1206,8 @@ else:
             hide_index=True,
         )
 
+    _perf_mark("order_belum_diverifikasi")
+
     # ---- Daily packing report (all orders packed today) ----
     st.divider()
     st.write("### 📅 Laporan Packing Hari Ini")
@@ -1242,6 +1269,8 @@ else:
         # on every row. Now built via the same shared build_rowspan_rows_html()
         # the on-screen table above uses, with its own print-oriented CSS
         # below (Arial/white, separate from the on-screen dark styling).
+        _perf_mark("daily_packing_report_onscreen")
+
         _report_rows_for_print = report_rows.copy()
         _report_rows_for_print["Jumlah"] = _report_rows_for_print["Jumlah"].apply(
             lambda v: int(v) if pd.notna(v) else 0
@@ -1300,6 +1329,8 @@ else:
                 height=0,
             )
 
+        _perf_mark("print_html_generation")
+
     # ---- Packing History ----
     st.divider()
     st.write("### 📊 Packing History")
@@ -1349,3 +1380,14 @@ else:
         chart_data = daily_counts.sort_values("Date").copy()
         chart_data["Date"] = chart_data["Date"].astype(str)
         st.line_chart(chart_data.set_index("Date")["Packed Count"], use_container_width=True)
+
+_perf_mark("packing_history_chart")
+
+# ---- TEMPORARY: display profiling results ---------------------------------
+with st.sidebar:
+    with st.expander("⏱️ TEMPORARY: Section Timings (this rerun)"):
+        _perf_total = sum(t for _, t in _PERF_LOG)
+        for _section, _elapsed in _PERF_LOG:
+            st.write(f"**{_section}:** {_elapsed * 1000:.1f} ms")
+        st.write(f"**TOTAL:** {_perf_total * 1000:.1f} ms")
+# ---- END TEMPORARY: display profiling results ------------------------------
