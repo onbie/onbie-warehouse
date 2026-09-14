@@ -699,6 +699,25 @@ with st.sidebar:
         # ----------------------------------------------------------------
 
         # ----------------------------------------------------------------
+        # TEMPORARY — Cloud Outbound IP diagnostic. Shows the public IP
+        # this app's outbound requests appear to come from (as seen by an
+        # external service), useful for allowlisting with Shopee or
+        # debugging network-level issues. No Shopee API/auth logic
+        # involved at all — a plain outbound GET to api.ipify.org.
+        # ----------------------------------------------------------------
+        if st.button("🧪 TEMPORARY — Cloud Outbound IP", key="btn_diag_outbound_ip"):
+            try:
+                import requests as _diag_ip_requests
+                _diag_ip_resp = _diag_ip_requests.get("https://api.ipify.org", params={"format": "text"}, timeout=10)
+                st.caption("TEMPORARY — Cloud Outbound IP")
+                st.code(_diag_ip_resp.text.strip(), language="text")
+            except Exception as e:
+                st.error(f"❌ Outbound IP check failed: {type(e).__name__}: {e}")
+        # ----------------------------------------------------------------
+        # END TEMPORARY — Cloud Outbound IP diagnostic
+        # ----------------------------------------------------------------
+
+        # ----------------------------------------------------------------
         # END Phase 1
         # ----------------------------------------------------------------
 
