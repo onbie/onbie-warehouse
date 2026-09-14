@@ -610,6 +610,95 @@ with st.sidebar:
                     st.error(_message)
 
         # ----------------------------------------------------------------
+        # TEMPORARY — v2.shop.get_shop_info diagnostic, for sending to
+        # Shopee support. Makes its own raw signed request (reusing
+        # existing shopee_auth/shopee_api helper functions for token +
+        # signature — no auth/signing logic duplicated or changed, and no
+        # permanent behavior/UI change anywhere else). Displays request
+        # timestamp, Partner ID, Shop ID, HTTP status, Request ID, and the
+        # raw response — all in one st.code() block so it can be copied in
+        # a single click. NEVER shows partner key, secret, access token,
+        # refresh token, or signature.
+        # ----------------------------------------------------------------
+        if st.button("🧪 Diagnose get_shop_info", key="btn_diag_get_shop_info"):
+            try:
+                import shopee_api as _diag_shopee_api
+                import shopee_auth as _diag_shopee_auth
+                import requests as _diag_requests
+                import time as _diag_time
+                import json as _diag_json
+                from datetime import datetime as _diag_datetime, timezone as _diag_timezone
+
+                _diag_access_token = _diag_shopee_auth.get_valid_access_token()
+                _diag_tokens = _diag_shopee_auth.load_tokens()
+                _diag_shop_id = int(_diag_tokens.get("shop_id", 0)) if _diag_tokens else 0
+                _diag_partner_id, _diag_partner_key = _diag_shopee_auth.get_credentials()
+                _diag_timestamp = int(_diag_time.time())
+                _diag_timestamp_iso = _diag_datetime.fromtimestamp(
+                    _diag_timestamp, tz=_diag_timezone.utc
+                ).strftime("%Y-%m-%d %H:%M:%S UTC")
+
+                _diag_path = "/api/v2/shop/get_shop_info"
+                _diag_sign = _diag_shopee_api._generate_protected_signature(
+                    _diag_partner_id, _diag_path, _diag_timestamp,
+                    _diag_access_token, _diag_shop_id, _diag_partner_key,
+                )
+                _diag_query_params = {
+                    "partner_id":   _diag_partner_id,
+                    "timestamp":    _diag_timestamp,
+                    "sign":         _diag_sign,
+                    "access_token": _diag_access_token,
+                    "shop_id":      _diag_shop_id,
+                }
+                _diag_url = f"{_diag_shopee_api.SHOPEE_HOST}{_diag_path}"
+                _diag_resp = _diag_requests.get(_diag_url, params=_diag_query_params, timeout=15)
+                try:
+                    _diag_body = _diag_resp.json()
+                except ValueError:
+                    _diag_body = {"_raw_text": _diag_resp.text}
+
+                # Request ID: prefer the JSON body's own "request_id" field
+                # (Shopee's standard field for this); fall back to checking
+                # likely HTTP header names if the body doesn't have one.
+                _diag_request_id = _diag_body.get("request_id")
+                _diag_request_id_source = "body"
+                if not _diag_request_id:
+                    _diag_header_candidates = [
+                        "X-Request-Id", "X-Request-ID", "Request-Id", "Request-ID",
+                        "X-Trace-Id", "X-Trace-ID", "X-Bff-Trace-Id", "Trace-Id",
+                    ]
+                    for _header_name in _diag_header_candidates:
+                        _header_value = _diag_resp.headers.get(_header_name)
+                        if _header_value:
+                            _diag_request_id = _header_value
+                            _diag_request_id_source = f"header: {_header_name}"
+                            break
+                if not _diag_request_id:
+                    _diag_request_id = "(not found in body or headers)"
+                    _diag_request_id_source = "none"
+
+                _diag_report_lines = [
+                    "=== v2.shop.get_shop_info diagnostic ===",
+                    f"Request timestamp : {_diag_timestamp_iso} (unix: {_diag_timestamp})",
+                    f"Partner ID         : {_diag_partner_id}",
+                    f"Shop ID            : {_diag_shop_id}",
+                    f"HTTP status        : {_diag_resp.status_code}",
+                    f"Request ID         : {_diag_request_id} (source: {_diag_request_id_source})",
+                    "",
+                    "Raw response body:",
+                    _diag_json.dumps(_diag_body, indent=2, ensure_ascii=False),
+                ]
+                _diag_report_text = "\n".join(_diag_report_lines)
+
+                st.caption("Copy the block below and send to Shopee support:")
+                st.code(_diag_report_text, language="text")
+            except Exception as e:
+                st.error(f"❌ get_shop_info diagnostic failed: {type(e).__name__}: {e}")
+        # ----------------------------------------------------------------
+        # END TEMPORARY — v2.shop.get_shop_info diagnostic
+        # ----------------------------------------------------------------
+
+        # ----------------------------------------------------------------
         # END Phase 1
         # ----------------------------------------------------------------
 
