@@ -1307,6 +1307,22 @@ else:
             "Jumlah": "Qty",
         })[["Order Number", "Username", "Recipient", "Platform", "Shop", "Kabupaten/Kota", "Shipping", "Ekspedisi", "Variant", "Qty"]]
 
+        # Display-only readability tweak for multi-variant orders: still
+        # exactly 1 variant = 1 row, still a plain DataFrame (native
+        # st.dataframe() below — sorting/select/copy/resize all keep
+        # working). Rows are naturally already grouped by Order Number
+        # (adapt_shopee_api_to_df() emits an order's item rows
+        # consecutively), so for the 2nd+ row of the same order, blank the
+        # order-level columns and show "↳" in Order Number instead of
+        # repeating the same values. Variant/Qty stay untouched on every
+        # row. A single-variant order is never marked as a duplicate, so
+        # it's unaffected.
+        belum_display_df = belum_display_df.copy()
+        _belum_is_repeat_variant = belum_display_df["Order Number"].duplicated(keep="first")
+        _belum_order_level_cols = ["Username", "Recipient", "Platform", "Shop", "Kabupaten/Kota", "Shipping", "Ekspedisi"]
+        belum_display_df.loc[_belum_is_repeat_variant, _belum_order_level_cols] = ""
+        belum_display_df.loc[_belum_is_repeat_variant, "Order Number"] = "↳"
+
         styled_belum_df = belum_display_df
         st.dataframe(
             styled_belum_df,
