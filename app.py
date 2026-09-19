@@ -1012,224 +1012,239 @@ else:
 if orders_df.empty:
     st.warning("No orders loaded. Please check data/orders_master.csv")
 else:
-    packed_orders = load_packed_orders()
+    # Fragment: a scan / print click reruns only this section, not the dashboard tables/chart below.
+    # Anything that changes packed.csv must call st.rerun() (app scope) so the dashboard refreshes.
+    @st.fragment
+    def scan_and_order_section():
+        # Re-resolve orders_df here: a fragment-only rerun does not re-execute the module-level lookup
+        # above, and the 5-min auto-sync fragment may have replaced st.session_state["shopee_orders_df"]
+        # since the last full run. Same resolution order as the module-level lookup.
+        if "shopee_orders_df" in st.session_state:
+            orders_df = st.session_state["shopee_orders_df"]
+        else:
+            orders_df = load_shopee_orders()
 
-    with st.form("scan_form", clear_on_submit=True):
-        search_query = st.text_input(
-            "🔍 Scan / Cari No. Pesanan atau No. Resi",
-            placeholder="Scan barcode, atau Enter kosong untuk konfirmasi pack...",
-        )
-        submitted = st.form_submit_button("Cari / Konfirmasi Pack")
+        packed_orders = load_packed_orders()
 
-    st.markdown(
-        """
-        <style>
-        div[data-testid="stFormSubmitButton"] { display: none; }
-        </style>
-        """,
-        unsafe_allow_html=True,
-    )
-
-    if submitted:
-        q = str(search_query).strip()
-
-        if q:
-            # New scan: search and display the order
-            mask = (
-                orders_df["No. Pesanan"].astype(str).str.contains(q, case=False, na=False)
-                | orders_df["No. Resi"].astype(str).str.contains(q, case=False, na=False)
+        with st.form("scan_form", clear_on_submit=True):
+            search_query = st.text_input(
+                "🔍 Scan / Cari No. Pesanan atau No. Resi",
+                placeholder="Scan barcode, atau Enter kosong untuk konfirmasi pack...",
             )
+            submitted = st.form_submit_button("Cari / Konfirmasi Pack")
+
+        st.markdown(
+            """
+            <style>
+            div[data-testid="stFormSubmitButton"] { display: none; }
+            </style>
+            """,
+            unsafe_allow_html=True,
+        )
+
+        if submitted:
+            q = str(search_query).strip()
+
+            if q:
+                # New scan: search and display the order
+                mask = (
+                    orders_df["No. Pesanan"].astype(str).str.contains(q, case=False, na=False)
+                    | orders_df["No. Resi"].astype(str).str.contains(q, case=False, na=False)
+                )
+                results = orders_df[mask]
+
+                if results.empty:
+                    st.session_state.displayed_order = None
+                    st.session_state.just_packed_order = None
+                    st.session_state.not_found_query = q
+                else:
+                    order_number = str(results.iloc[0]["No. Pesanan"]).strip()
+                    st.session_state.displayed_order = order_number
+                    st.session_state.just_packed_order = None
+                    st.session_state.not_found_query = None
+            else:
+                # Blank Enter = confirm pack the order currently on screen
+                st.session_state.not_found_query = None
+                order_number = st.session_state.displayed_order
+                if order_number:
+                    mask = orders_df["No. Pesanan"].astype(str).str.strip() == order_number
+                    results = orders_df[mask]
+                    if not results.empty:
+                        status = results.iloc[0].get('Status Pesanan', '-')
+                        packable = is_packable_status(status)
+                        already_packed = order_number in packed_orders
+                        if packable and not already_packed:
+                            save_packed_order(order_number, results)
+                            st.session_state.just_packed_order = order_number
+                            st.rerun()  # full-app rerun: dashboard below must reflect the new pack
+
+        # ---- Order not found banner ----
+        if st.session_state.not_found_query:
+            big_banner(["❌ ORDER TIDAK DITEMUKAN", "Cek nomor pesanan / nomor resi"], "#b71c1c")
+
+        _perf_mark("search_and_filter")
+
+        # ---- Render currently displayed order (persists across reruns) ----
+        if st.session_state.displayed_order:
+            order_number = st.session_state.displayed_order
+            mask = orders_df["No. Pesanan"].astype(str).str.strip() == order_number
             results = orders_df[mask]
 
             if results.empty:
                 st.session_state.displayed_order = None
-                st.session_state.just_packed_order = None
-                st.session_state.not_found_query = q
             else:
-                order_number = str(results.iloc[0]["No. Pesanan"]).strip()
-                st.session_state.displayed_order = order_number
-                st.session_state.just_packed_order = None
-                st.session_state.not_found_query = None
-        else:
-            # Blank Enter = confirm pack the order currently on screen
-            st.session_state.not_found_query = None
-            order_number = st.session_state.displayed_order
-            if order_number:
-                mask = orders_df["No. Pesanan"].astype(str).str.strip() == order_number
-                results = orders_df[mask]
-                if not results.empty:
-                    status = results.iloc[0].get('Status Pesanan', '-')
-                    packable = is_packable_status(status)
-                    already_packed = order_number in packed_orders
-                    if packable and not already_packed:
-                        save_packed_order(order_number, results)
-                        st.session_state.just_packed_order = order_number
+                order_status = results.iloc[0].get('Status Pesanan', '-')
+                cancelled = is_cancelled_status(order_status)
+                packable = is_packable_status(order_status)
+                packed_orders = load_packed_orders()  # refresh after possible packing above
+                is_packed = order_number in packed_orders
+                packed_at = get_packed_at(order_number) if is_packed else None
 
-    # ---- Order not found banner ----
-    if st.session_state.not_found_query:
-        big_banner(["❌ ORDER TIDAK DITEMUKAN", "Cek nomor pesanan / nomor resi"], "#b71c1c")
-
-    _perf_mark("search_and_filter")
-
-    # ---- Render currently displayed order (persists across reruns) ----
-    if st.session_state.displayed_order:
-        order_number = st.session_state.displayed_order
-        mask = orders_df["No. Pesanan"].astype(str).str.strip() == order_number
-        results = orders_df[mask]
-
-        if results.empty:
-            st.session_state.displayed_order = None
-        else:
-            order_status = results.iloc[0].get('Status Pesanan', '-')
-            cancelled = is_cancelled_status(order_status)
-            packable = is_packable_status(order_status)
-            packed_orders = load_packed_orders()  # refresh after possible packing above
-            is_packed = order_number in packed_orders
-            packed_at = get_packed_at(order_number) if is_packed else None
-
-            if cancelled:
-                big_banner(["❌ PESANAN BATAL", "Jangan packing order ini"], "#b71c1c")
-            elif st.session_state.just_packed_order == order_number:
-                big_banner(["✅ SUDAH DI-PACK", "Order ini berhasil dicatat"], "#2e7d32")
-            elif is_packed:
-                ts_text = f"Packed At: {packed_at}" if packed_at else "Packed At: tidak tercatat"
-                big_banner(["✅ ORDER SUDAH DIVERIFIKASI", ts_text], "#2e7d32")
-            elif packable:
-                big_banner(["🟢 PERLU DIKIRIM", "Order siap diverifikasi & di-pack"], "#2e7d32")
-            else:
-                big_banner([f"STATUS: {order_status}", "Status bukan 'Perlu Dikirim' — tidak bisa di-pack"], "#757575")
-
-            with st.container(border=True):
-                st.write(f"### 📦 Produk dalam order ini ({len(results)} item)")
-
-                for _, product in results.iterrows():
-                    quantity = int(product.get('Jumlah', 0)) if pd.notna(product.get('Jumlah')) else 0
-                    nama_produk = product.get('Nama Produk', '-')
-                    nama_variasi = product.get('Nama Variasi', '-')
-                    sku_induk_html = ""
-                    if "SKU Induk" in results.columns:
-                        sku_induk = product.get('SKU Induk', '-')
-                        sku_induk_html = f"""
-                                <div style="font-size: 13px; color: #888; margin-top: 4px;">
-                                    SKU: {sku_induk}
-                                </div>"""
-
-                    st.markdown(
-                        f"""
-                        <div style="
-                            border: 2px solid #e0e0e0;
-                            border-radius: 12px;
-                            padding: 24px;
-                            margin-bottom: 16px;
-                            background-color: #fafafa;
-                            display: flex;
-                            justify-content: space-between;
-                            align-items: center;
-                        ">
-                            <div style="flex: 1; min-width: 0; padding-right: 16px;">
-                                <div style="font-size: 22px; font-weight: 700; color: #1a1a1a; line-height: 1.3;">
-                                    {nama_produk}
-                                </div>
-                                <div style="font-size: 16px; color: #555; margin-top: 6px;">
-                                    Variasi: <b>{nama_variasi}</b>
-                                </div>{sku_induk_html}
-                            </div>
-                            <div style="text-align: center; min-width: 110px;">
-                                <div style="font-size: 13px; color: #888; text-transform: uppercase; letter-spacing: 1px;">
-                                    QTY
-                                </div>
-                                <div style="font-size: 48px; font-weight: 800; color: #d32f2f; line-height: 1;">
-                                    {quantity}
-                                </div>
-                            </div>
-                        </div>
-                        """,
-                        unsafe_allow_html=True,
-                    )
-
-                if cancelled or not packable:
-                    st.button("🚫 Tidak Bisa Di-Pack", disabled=True, key="btn_blocked")
+                if cancelled:
+                    big_banner(["❌ PESANAN BATAL", "Jangan packing order ini"], "#b71c1c")
+                elif st.session_state.just_packed_order == order_number:
+                    big_banner(["✅ SUDAH DI-PACK", "Order ini berhasil dicatat"], "#2e7d32")
                 elif is_packed:
-                    st.button("✅ Sudah Di-Pack", disabled=True, key="btn_already_packed")
+                    ts_text = f"Packed At: {packed_at}" if packed_at else "Packed At: tidak tercatat"
+                    big_banner(["✅ ORDER SUDAH DIVERIFIKASI", ts_text], "#2e7d32")
+                elif packable:
+                    big_banner(["🟢 PERLU DIKIRIM", "Order siap diverifikasi & di-pack"], "#2e7d32")
                 else:
-                    if st.button("📌 Mark as Packed", key="btn_manual_pack", use_container_width=True):
-                        save_packed_order(order_number, results)
-                        st.session_state.just_packed_order = order_number
-                        st.rerun()
+                    big_banner([f"STATUS: {order_status}", "Status bukan 'Perlu Dikirim' — tidak bisa di-pack"], "#757575")
 
-                with st.expander("📋 Detail Order"):
-                    d1, d2 = st.columns(2)
-                    with d1:
-                        st.write(f"**Order Number:** {order_number}")
-                        st.write(f"**No. Resi:** {results.iloc[0].get('No. Resi', '-')}")
-                        st.write(f"**Username:** {results.iloc[0].get('Username (Pembeli)', '-')}")
-                        st.write(f"**Nama Penerima:** {results.iloc[0].get('Nama Penerima', '-')}")
-                    with d2:
-                        st.write(f"**Shop:** {results.iloc[0].get('Toko', '-')}")
-                        st.write(f"**Kabupaten/Kota:** {results.iloc[0].get('Kota/Kabupaten', '-')}")
-                        st.write(f"**Metode Kirim:** {results.iloc[0].get('Antar ke counter/ pick-up', '-')}")
-                        st.write(f"**Ekspedisi:** {results.iloc[0].get('Ekspedisi', '-')}")
-                        st.write(f"**Catatan Pembeli:** {results.iloc[0].get('Catatan dari Pembeli', '-')}")
+                with st.container(border=True):
+                    st.write(f"### 📦 Produk dalam order ini ({len(results)} item)")
 
-                # ---- Print this order only ----
-                row = results.iloc[0]
-                product_rows_html = "".join(
-                    f"""
-                    <tr>
-                        <td>{row.get('No. Pesanan', '-')}</td>
-                        <td>{row.get('Username (Pembeli)', '-')}</td>
-                        <td>{row.get('Nama Penerima', '-')}</td>
-                        <td>{row.get('Platform', '-')}</td>
-                        <td>{row.get('Toko', '-')}</td>
-                        <td>{row.get('Kota/Kabupaten', '-')}</td>
-                        <td>{row.get('Antar ke counter/ pick-up', '-')}</td>
-                        <td>{row.get('Ekspedisi', '-')}</td>
-                        <td>{p.get('Nama Variasi', '-')}</td>
-                        <td>{int(p.get('Jumlah', 0)) if pd.notna(p.get('Jumlah')) else 0}</td>
-                    </tr>
-                    """
-                    for _, p in results.iterrows()
-                )
+                    for _, product in results.iterrows():
+                        quantity = int(product.get('Jumlah', 0)) if pd.notna(product.get('Jumlah')) else 0
+                        nama_produk = product.get('Nama Produk', '-')
+                        nama_variasi = product.get('Nama Variasi', '-')
+                        sku_induk_html = ""
+                        if "SKU Induk" in results.columns:
+                            sku_induk = product.get('SKU Induk', '-')
+                            sku_induk_html = f"""
+                                    <div style="font-size: 13px; color: #888; margin-top: 4px;">
+                                        SKU: {sku_induk}
+                                    </div>"""
 
-                printable_html = f"""
-                <html>
-                <head>
-                <title>Order {order_number}</title>
-                <style>
-                    body {{ font-family: Arial, sans-serif; padding: 24px; }}
-                    h1 {{ font-size: 20px; }}
-                    table {{ border-collapse: collapse; width: 100%; margin-top: 12px; font-size: 12px; }}
-                    th {{ background:#f0f0f0; padding:8px; border:1px solid #ccc; text-align:center; vertical-align:middle; font-weight:bold; }}
-                    td {{ padding:8px; border:1px solid #ccc; text-align:center; vertical-align:middle; }}
-                </style>
-                </head>
-                <body onload="window.print()">
-                    <h1>📦 Packing Slip</h1>
-                    <table>
-                        <tr><th>No. Pesanan</th><th>Username</th><th>Nama Penerima</th><th>Platform</th><th>Toko</th><th>Kota/Kabupaten</th><th>Nama Logistik</th><th>Ekspedisi</th><th>Variasi</th><th>Qty</th></tr>
-                        {product_rows_html}
-                    </table>
-                    <p style="margin-top:24px;font-size:12px;color:#888;">Dicetak: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</p>
-                </body>
-                </html>
-                """
+                        st.markdown(
+                            f"""
+                            <div style="
+                                border: 2px solid #e0e0e0;
+                                border-radius: 12px;
+                                padding: 24px;
+                                margin-bottom: 16px;
+                                background-color: #fafafa;
+                                display: flex;
+                                justify-content: space-between;
+                                align-items: center;
+                            ">
+                                <div style="flex: 1; min-width: 0; padding-right: 16px;">
+                                    <div style="font-size: 22px; font-weight: 700; color: #1a1a1a; line-height: 1.3;">
+                                        {nama_produk}
+                                    </div>
+                                    <div style="font-size: 16px; color: #555; margin-top: 6px;">
+                                        Variasi: <b>{nama_variasi}</b>
+                                    </div>{sku_induk_html}
+                                </div>
+                                <div style="text-align: center; min-width: 110px;">
+                                    <div style="font-size: 13px; color: #888; text-transform: uppercase; letter-spacing: 1px;">
+                                        QTY
+                                    </div>
+                                    <div style="font-size: 48px; font-weight: 800; color: #d32f2f; line-height: 1;">
+                                        {quantity}
+                                    </div>
+                                </div>
+                            </div>
+                            """,
+                            unsafe_allow_html=True,
+                        )
 
-                print_trigger = st.button("🖨️ Print Order Ini")
-                if print_trigger:
-                    escaped = printable_html.replace("`", "\\`")
-                    components.html(
+                    if cancelled or not packable:
+                        st.button("🚫 Tidak Bisa Di-Pack", disabled=True, key="btn_blocked")
+                    elif is_packed:
+                        st.button("✅ Sudah Di-Pack", disabled=True, key="btn_already_packed")
+                    else:
+                        if st.button("📌 Mark as Packed", key="btn_manual_pack", use_container_width=True):
+                            save_packed_order(order_number, results)
+                            st.session_state.just_packed_order = order_number
+                            st.rerun()
+
+                    with st.expander("📋 Detail Order"):
+                        d1, d2 = st.columns(2)
+                        with d1:
+                            st.write(f"**Order Number:** {order_number}")
+                            st.write(f"**No. Resi:** {results.iloc[0].get('No. Resi', '-')}")
+                            st.write(f"**Username:** {results.iloc[0].get('Username (Pembeli)', '-')}")
+                            st.write(f"**Nama Penerima:** {results.iloc[0].get('Nama Penerima', '-')}")
+                        with d2:
+                            st.write(f"**Shop:** {results.iloc[0].get('Toko', '-')}")
+                            st.write(f"**Kabupaten/Kota:** {results.iloc[0].get('Kota/Kabupaten', '-')}")
+                            st.write(f"**Metode Kirim:** {results.iloc[0].get('Antar ke counter/ pick-up', '-')}")
+                            st.write(f"**Ekspedisi:** {results.iloc[0].get('Ekspedisi', '-')}")
+                            st.write(f"**Catatan Pembeli:** {results.iloc[0].get('Catatan dari Pembeli', '-')}")
+
+                    # ---- Print this order only ----
+                    row = results.iloc[0]
+                    product_rows_html = "".join(
                         f"""
-                        <script>
-                        const w = window.open('', '_blank');
-                        w.document.write(`{escaped}`);
-                        w.document.close();
-                        </script>
-                        """,
-                        height=0,
+                        <tr>
+                            <td>{row.get('No. Pesanan', '-')}</td>
+                            <td>{row.get('Username (Pembeli)', '-')}</td>
+                            <td>{row.get('Nama Penerima', '-')}</td>
+                            <td>{row.get('Platform', '-')}</td>
+                            <td>{row.get('Toko', '-')}</td>
+                            <td>{row.get('Kota/Kabupaten', '-')}</td>
+                            <td>{row.get('Antar ke counter/ pick-up', '-')}</td>
+                            <td>{row.get('Ekspedisi', '-')}</td>
+                            <td>{p.get('Nama Variasi', '-')}</td>
+                            <td>{int(p.get('Jumlah', 0)) if pd.notna(p.get('Jumlah')) else 0}</td>
+                        </tr>
+                        """
+                        for _, p in results.iterrows()
                     )
 
-    # Keep the scan box focused and ready for the next barcode
-    focus_search_box()
+                    printable_html = f"""
+                    <html>
+                    <head>
+                    <title>Order {order_number}</title>
+                    <style>
+                        body {{ font-family: Arial, sans-serif; padding: 24px; }}
+                        h1 {{ font-size: 20px; }}
+                        table {{ border-collapse: collapse; width: 100%; margin-top: 12px; font-size: 12px; }}
+                        th {{ background:#f0f0f0; padding:8px; border:1px solid #ccc; text-align:center; vertical-align:middle; font-weight:bold; }}
+                        td {{ padding:8px; border:1px solid #ccc; text-align:center; vertical-align:middle; }}
+                    </style>
+                    </head>
+                    <body onload="window.print()">
+                        <h1>📦 Packing Slip</h1>
+                        <table>
+                            <tr><th>No. Pesanan</th><th>Username</th><th>Nama Penerima</th><th>Platform</th><th>Toko</th><th>Kota/Kabupaten</th><th>Nama Logistik</th><th>Ekspedisi</th><th>Variasi</th><th>Qty</th></tr>
+                            {product_rows_html}
+                        </table>
+                        <p style="margin-top:24px;font-size:12px;color:#888;">Dicetak: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</p>
+                    </body>
+                    </html>
+                    """
+
+                    print_trigger = st.button("🖨️ Print Order Ini")
+                    if print_trigger:
+                        escaped = printable_html.replace("`", "\\`")
+                        components.html(
+                            f"""
+                            <script>
+                            const w = window.open('', '_blank');
+                            w.document.write(`{escaped}`);
+                            w.document.close();
+                            </script>
+                            """,
+                            height=0,
+                        )
+
+        # Keep the scan box focused and ready for the next barcode
+        focus_search_box()
+
+    scan_and_order_section()
 
     _perf_mark("order_detail_rendering")
 
