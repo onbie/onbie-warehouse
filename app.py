@@ -1395,6 +1395,19 @@ else:
             "Nama Variasi": "Variant",
             "Jumlah": "Qty"
         })
+
+        # Display-only: same multi-variant readability tweak as "Order Belum
+        # Diverifikasi" above. report_rows / report_df (used by the print HTML
+        # and the snapshot/fallback logic) are NOT touched -- only this
+        # on-screen copy. 1 variant = 1 row is preserved; for the 2nd+ row of
+        # the same Order Number, blank the order-level columns and show "↳" in
+        # Order Number. Variant/Qty stay on every row.
+        report_display_df = styled_report_df.copy()
+        _report_is_repeat_variant = report_display_df["Order Number"].duplicated(keep="first")
+        _report_order_level_cols = ["Username", "Recipient", "Platform", "Shop", "Kabupaten/Kota", "Shipping", "Ekspedisi"]
+        report_display_df.loc[_report_is_repeat_variant, _report_order_level_cols] = ""
+        report_display_df.loc[_report_is_repeat_variant, "Order Number"] = "↳"
+        styled_report_df = report_display_df
         st.dataframe(
             styled_report_df,
             use_container_width=True,
