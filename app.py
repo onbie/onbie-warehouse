@@ -14,6 +14,11 @@ SHOPEE_DATA_FILE = "data/shopee_orders.csv"
 # Onbie's Shopee shop ID. Token/API calls are explicitly shop-scoped
 # (shopee_auth / shopee_api take shop_id); Onbie is the only connected shop for now.
 SHOPEE_ONBIE_SHOP_ID = 1272241861
+# Shopee shops managed by this app: label -> shop_id. This is an ALLOWLIST:
+# only shops listed here are synced into the packing queue. Onbie only for now.
+# Every token/API call passes an explicit shop_id taken from this registry —
+# there is no "latest token" / shop_id=None path.
+SHOPEE_SHOPS = {"Onbie": SHOPEE_ONBIE_SHOP_ID}
 SNAPSHOT_FILE = "packed_snapshots.csv"
 SNAPSHOT_COLUMNS = [
     "order_number", "packed_at", "No. Pesanan", "Username (Pembeli)",
@@ -122,6 +127,15 @@ def _handle_shopee_oauth():
     code = params.get("code", "")
     shop_id_str = params.get("shop_id", "")
 
+    if code and not shop_id_str:
+        # Shopee returned a code but no shop_id (typically a merchant / main-account
+        # authorization). That flow isn't supported here — say so instead of ignoring it.
+        st.error(
+            "❌ Shopee mengembalikan `code` tanpa `shop_id` (kemungkinan otorisasi akun "
+            "merchant / main account). Flow ini belum didukung — tidak ada token yang disimpan."
+        )
+        return
+
     if not code or not shop_id_str:
         return  # normal page load, not an OAuth callback
 
@@ -139,6 +153,23 @@ def _handle_shopee_oauth():
             "fetch_time":    saved["fetch_time"],
             "shop_id":       saved["shop_id"],
         })
+
+        # Tell the user which registered shop this authorization connected. The
+        # rerun below wipes anything rendered now, so leave a one-time notice that
+        # the sidebar shows on the next run.
+        _connected_label = next(
+            (_l for _l, _sid in SHOPEE_SHOPS.items() if _sid == saved["shop_id"]), None
+        )
+        if _connected_label:
+            st.session_state["_shopee_oauth_notice"] = (
+                "success", f"✅ {_connected_label} terhubung (shop_id {saved['shop_id']})."
+            )
+        else:
+            st.session_state["_shopee_oauth_notice"] = (
+                "warning",
+                f"⚠️ Token untuk shop_id {saved['shop_id']} tersimpan, tapi shop ini belum "
+                "terdaftar di SHOPEE_SHOPS — belum akan disync ke packing queue.",
+            )
 
         # Clear the OAuth params from the URL so a page refresh doesn't
         # attempt to re-use the same code (codes are one-time use),
@@ -159,12 +190,15 @@ def _handle_shopee_oauth():
 _handle_shopee_oauth()
 
 
-def adapt_shopee_api_to_df(orders_with_detail, shop_name="", channel_service_types=None):
+def adapt_shopee_api_to_df(orders_with_detail, shop_name="", channel_service_types=None, shop_id=None):
     """Convert get_orders_with_detail() output into a DataFrame matching
     the column shape the existing packing UI expects (same columns as
     load_shopee_orders() / SHOPEE_DATA_FILE).
 
     One row per product item (1 variant = 1 row).
+    Every row also carries an INTERNAL "Shop ID" column (shop_id argument) —
+    used only to replace one shop's rows in the queue without touching another
+    shop's rows. It is never shown in any user-facing table.
     Only confirmed-working Shopee API fields are mapped. recipient_address
     and buyer_username are confirmed and mapped below. note and
     package_list (tracking_number, fulfillment method) were added next and
@@ -214,6 +248,7 @@ def adapt_shopee_api_to_df(orders_with_detail, shop_name="", channel_service_typ
         "Nama Variasi", "Jumlah", "Berat (Kg)", "Status Pesanan",
         "Waktu Pesanan Dibuat", "Tenggat Pengiriman", "Antar ke counter/ pick-up",
         "Ekspedisi", "Catatan dari Pembeli", "Platform", "Toko", "Sumber",
+        "Shop ID",
     ]
 
     rows = []
@@ -276,6 +311,7 @@ def adapt_shopee_api_to_df(orders_with_detail, shop_name="", channel_service_typ
                 "Platform":          "Shopee",
                 "Toko":              shop_name,
                 "Sumber":            "Shopee API",
+                "Shop ID":           shop_id if shop_id is not None else "",
                 "Jumlah":            0,
             })
         else:
@@ -300,6 +336,7 @@ def adapt_shopee_api_to_df(orders_with_detail, shop_name="", channel_service_typ
                     "Platform":          "Shopee",
                     "Toko":              shop_name,
                     "Sumber":            "Shopee API",
+                    "Shop ID":           shop_id if shop_id is not None else "",
                 })
                 rows.append(row)
 
@@ -307,49 +344,102 @@ def adapt_shopee_api_to_df(orders_with_detail, shop_name="", channel_service_typ
 
 
 # ---- Automatic Shopee order sync (every 5 minutes while the app is open) ----
-# _sync_shopee_orders_now() is the single sync implementation — both the
-# manual "Sync Now" button below and the automatic timer call this same
-# function, so there's only ever one place that talks to the Shopee API for
-# this purpose (no duplicated fetch/dedup logic).
+# _sync_one_shop() is the single per-shop sync implementation — both the
+# manual "Sync Now" button below and the automatic timer call it, so there's
+# only ever one place that talks to the Shopee API for this purpose (no
+# duplicated fetch/dedup logic).
 SHOPEE_AUTO_SYNC_INTERVAL_SECONDS = 5 * 60
 
 
-def _get_shopee_shop_name():
-    """Fetch and cache the connected shop's real name via
+def _normalize_shop_id_column(df):
+    """Return a copy of df with the internal "Shop ID" column present and
+    numeric. Rows from before multi-shop support (older shopee_orders.csv /
+    session data) have no Shop ID — they were all Onbie's."""
+    df = df.copy()
+    if "Shop ID" not in df.columns:
+        df["Shop ID"] = SHOPEE_ONBIE_SHOP_ID
+    else:
+        df["Shop ID"] = (
+            pd.to_numeric(df["Shop ID"], errors="coerce")
+            .fillna(SHOPEE_ONBIE_SHOP_ID)
+            .astype("int64")
+        )
+    return df
+
+
+def _read_persisted_shopee_queue():
+    """The last persisted queue (SHOPEE_DATA_FILE) as a DataFrame, or None if
+    there is none. Used only as the "current queue" when a sync runs in a
+    fresh session, so another shop's rows are carried over instead of lost."""
+    if not os.path.exists(SHOPEE_DATA_FILE):
+        return None
+    try:
+        df = pd.read_csv(SHOPEE_DATA_FILE)
+    except Exception:
+        return None
+    df.columns = [str(c).strip() for c in df.columns]
+    for _c in df.columns:
+        if df[_c].dtype == object:
+            df[_c] = df[_c].fillna("")
+    return df
+
+
+def _get_shop_sync_status(shop_id):
+    """Per-shop sync status kept in st.session_state (created on demand):
+    last_attempt_ts, last_ok_ts, error, n_orders."""
+    if "_shopee_shop_status" not in st.session_state:
+        st.session_state["_shopee_shop_status"] = {}
+    _all = st.session_state["_shopee_shop_status"]
+    if shop_id not in _all:
+        _all[shop_id] = {"last_attempt_ts": 0, "last_ok_ts": None, "error": None, "n_orders": None}
+    return _all[shop_id]
+
+
+def _get_shopee_shop_name(shop_id, label=""):
+    """Fetch and cache a shop's real name via
     shopee_api.get_shop_info() (GET /api/v2/shop/get_shop_info), so "Toko"
     reflects the actual shop instead of staying blank. The shop name
-    doesn't change between orders/syncs, so this is cached in
+    doesn't change between orders/syncs, so this is cached per shop in
     st.session_state and only re-fetched if not yet cached or a previous
-    attempt failed — not fetched on every sync.
+    attempt failed — not fetched on every sync. If the name can't be
+    fetched, the shop's registry label is used (not cached, so the real
+    name is retried next sync) so Toko is never blank.
     """
-    if st.session_state.get("_shopee_shop_name"):
-        return st.session_state["_shopee_shop_name"]
+    if "_shopee_shop_names" not in st.session_state:
+        st.session_state["_shopee_shop_names"] = {}
+    _names = st.session_state["_shopee_shop_names"]
+    if _names.get(shop_id):
+        return _names[shop_id]
     try:
         import shopee_api as _shopee_api_shop
-        info = _shopee_api_shop.get_shop_info(shop_id=SHOPEE_ONBIE_SHOP_ID)
+        info = _shopee_api_shop.get_shop_info(shop_id=shop_id)
         shop_name = str(info.get("shop_name", "") or "").strip()
         if shop_name:
-            st.session_state["_shopee_shop_name"] = shop_name
-        return shop_name
+            _names[shop_id] = shop_name
+            return shop_name
     except Exception:
-        return ""
+        pass
+    return label
 
 
-def _get_shopee_channel_service_types():
+def _get_shopee_channel_service_types(shop_id):
     """Fetch and cache a {logistics_channel_id: service_type_identifier}
     map via shopee_api.get_channel_list() (GET
     /api/v2/logistics/get_channel_list), so the fulfillment method
     ("Antar ke counter" vs "Jemput / Pick-up") can be derived per-package
-    without ever hardcoding a channel ID. The shop's enabled channels
-    rarely change, so this is cached in st.session_state the same way
-    _get_shopee_shop_name() is — only re-fetched if not yet cached or a
+    without ever hardcoding a channel ID. A shop's enabled channels
+    rarely change, so this is cached per shop in st.session_state the same
+    way _get_shopee_shop_name() is — only re-fetched if not yet cached or a
     previous attempt failed.
     """
-    if st.session_state.get("_shopee_channel_service_types"):
-        return st.session_state["_shopee_channel_service_types"]
+    if "_shopee_channel_types" not in st.session_state:
+        st.session_state["_shopee_channel_types"] = {}
+    _cache = st.session_state["_shopee_channel_types"]
+    if _cache.get(shop_id):
+        return _cache[shop_id]
     try:
         import shopee_api as _shopee_api_channels
-        info = _shopee_api_channels.get_channel_list(shop_id=SHOPEE_ONBIE_SHOP_ID)
+        info = _shopee_api_channels.get_channel_list(shop_id=shop_id)
         channel_list = info.get("logistics_channel_list", [])
         if not isinstance(channel_list, list):
             channel_list = []
@@ -359,24 +449,72 @@ def _get_shopee_channel_service_types():
             if isinstance(ch, dict) and ch.get("logistics_channel_id") is not None
         }
         if channel_map:
-            st.session_state["_shopee_channel_service_types"] = channel_map
+            _cache[shop_id] = channel_map
         return channel_map
     except Exception:
         return {}
 
 
-def _sync_shopee_orders_now():
-    """Fetch READY_TO_SHIP + PROCESSED orders from Shopee, dedupe by
-    order_sn (keep first occurrence), and refresh the packing queue —
-    identical behavior to the original manual sync. Updates
-    st.session_state["shopee_orders_df"], writes SHOPEE_DATA_FILE, clears
-    the st.cache_data caches, and records the sync timestamp/outcome in
-    st.session_state so the sidebar can display it.
+def _replace_shop_rows(shop_id, fresh_df):
+    """Replace ONLY this shop's rows in the packing queue with fresh_df and
+    persist the merged queue (st.session_state["shopee_orders_df"] +
+    SHOPEE_DATA_FILE). Other shops' rows are never touched, so one shop's
+    sync (or failure — this is only called on success) can't delete another
+    shop's orders. Rows stay grouped in SHOPEE_SHOPS order."""
+    shop_id = int(shop_id)
+    current = st.session_state.get("shopee_orders_df")
+    if current is None:
+        current = _read_persisted_shopee_queue()
+    fresh = fresh_df.copy()
+    fresh["Shop ID"] = shop_id
+    if current is None or len(current) == 0:
+        kept = fresh.iloc[0:0]
+    else:
+        current = _normalize_shop_id_column(current)
+        kept = current[current["Shop ID"] != shop_id]
+
+    if kept.empty:
+        merged = fresh
+    elif fresh.empty:
+        merged = kept
+    else:
+        merged = pd.concat([kept, fresh], ignore_index=True)
+    merged = merged.reindex(columns=list(fresh.columns))
+
+    _rank = {sid: i for i, sid in enumerate(SHOPEE_SHOPS.values())}
+    merged = (
+        merged.assign(_shop_rank=merged["Shop ID"].map(_rank).fillna(len(_rank)))
+        .sort_values("_shop_rank", kind="stable")
+        .drop(columns="_shop_rank")
+        .reset_index(drop=True)
+    )
+
+    os.makedirs("data", exist_ok=True)
+    merged.to_csv(SHOPEE_DATA_FILE, index=False)
+    st.session_state["shopee_orders_df"] = merged
+    st.cache_data.clear()
+
+    # The same order number under two shops would break the one-order-number
+    # = one-order assumption used by packing; flag it (shown in the sidebar).
+    _shops_per_order = merged.groupby("No. Pesanan")["Shop ID"].nunique()
+    st.session_state["_shopee_order_conflicts"] = sorted(
+        str(_o) for _o in _shops_per_order[_shops_per_order > 1].index
+    )
+
+
+def _sync_one_shop(label, shop_id):
+    """Fetch READY_TO_SHIP + PROCESSED orders for ONE shop, dedupe by
+    order_sn (keep first occurrence), and replace that shop's rows in the
+    packing queue (other shops' rows untouched). Records this shop's own
+    sync timestamp/outcome in st.session_state so the sidebar can display it.
 
     Returns (success: bool, message: str).
     """
     import shopee_api as _shopee_api_sync
     import time as _time_sync
+
+    _status = _get_shop_sync_status(shop_id)
+    _status["last_attempt_ts"] = _time_sync.time()
 
     _time_to_sync   = int(_time_sync.time())
     _time_from_sync = _time_to_sync - 7 * 86400  # last 7 days
@@ -388,7 +526,7 @@ def _sync_shopee_orders_now():
             time_range_field="create_time",
             order_status="READY_TO_SHIP",
             detail_optional_fields=["item_list", "buyer_username", "recipient_address", "note", "shipping_carrier", "package_list"],
-            shop_id=SHOPEE_ONBIE_SHOP_ID,
+            shop_id=shop_id,
         )
         _raw_proc = _shopee_api_sync.get_orders_with_detail(
             time_from=_time_from_sync,
@@ -396,7 +534,7 @@ def _sync_shopee_orders_now():
             time_range_field="create_time",
             order_status="PROCESSED",
             detail_optional_fields=["item_list", "buyer_username", "recipient_address", "note", "shipping_carrier", "package_list"],
-            shop_id=SHOPEE_ONBIE_SHOP_ID,
+            shop_id=shop_id,
         )
         # Deduplicate by order_sn — keep first occurrence
         _seen = set()
@@ -408,47 +546,75 @@ def _sync_shopee_orders_now():
                 _raw_orders.append(_o)
         _synced_df = adapt_shopee_api_to_df(
             _raw_orders,
-            shop_name=_get_shopee_shop_name(),
-            channel_service_types=_get_shopee_channel_service_types(),
+            shop_name=_get_shopee_shop_name(shop_id, label),
+            channel_service_types=_get_shopee_channel_service_types(shop_id),
+            shop_id=shop_id,
         )
-        os.makedirs("data", exist_ok=True)
-        _synced_df.to_csv(SHOPEE_DATA_FILE, index=False)
-        st.session_state["shopee_orders_df"] = _synced_df
-        st.cache_data.clear()
+        _replace_shop_rows(shop_id, _synced_df)
         _n = _synced_df["No. Pesanan"].nunique()
-        st.session_state["_last_shopee_sync_ts"] = _time_sync.time()
-        st.session_state["_last_shopee_sync_error"] = None
+        _status["last_ok_ts"] = _time_sync.time()
+        _status["error"] = None
+        _status["n_orders"] = _n
         return True, f"✅ {_n} order READY_TO_SHIP di-load ke packing queue"
     except RuntimeError as _e:
         _msg = f"❌ Shopee API error: {_e}"
-        st.session_state["_last_shopee_sync_error"] = _msg
+        _status["error"] = _msg
         return False, _msg
     except ValueError as _e:
         _msg = f"❌ Parameter error: {_e}"
-        st.session_state["_last_shopee_sync_error"] = _msg
+        _status["error"] = _msg
         return False, _msg
     except Exception as _e:
         _msg = f"❌ Error: {_e}"
-        st.session_state["_last_shopee_sync_error"] = _msg
+        _status["error"] = _msg
         return False, _msg
 
 
+def _sync_shopee_orders_now():
+    """Sync every CONNECTED shop in SHOPEE_SHOPS, each one independently
+    (own token, own shop name/channel cache, own status; a failure in one
+    shop never touches another shop's rows). Both the manual "Sync Now"
+    button and the automatic timer's per-shop check use _sync_one_shop(), so
+    there's only ever one place that talks to the Shopee API for this
+    purpose.
+
+    Returns (success: bool, message: str). With a single connected shop the
+    message is exactly that shop's message; with several, one
+    "Label: message" per shop joined by " | " (success = all shops ok).
+    """
+    _results = []
+    for _label, _shop_id in SHOPEE_SHOPS.items():
+        if _shopee_auth.load_tokens(_shop_id) is None:
+            continue  # not connected — nothing to sync for this shop
+        _ok, _msg = _sync_one_shop(_label, _shop_id)
+        _results.append((_label, _ok, _msg))
+
+    if not _results:
+        return False, "❌ Shopee API error: No saved tokens found. Authorize Shopee via Connect Shopee first."
+    if len(_results) == 1:
+        return _results[0][1], _results[0][2]
+    return (
+        all(_ok for _, _ok, _ in _results),
+        " | ".join(f"{_label}: {_msg}" for _label, _, _msg in _results),
+    )
+
+
 def _maybe_auto_sync_shopee_orders():
-    """Run _sync_shopee_orders_now() only if Shopee is connected AND at
-    least SHOPEE_AUTO_SYNC_INTERVAL_SECONDS have passed since the last
-    successful sync. This, plus the fragment's own run_every timer below,
-    is what prevents duplicate API calls on every normal Streamlit rerun —
-    a plain page interaction in between auto-sync ticks does not re-trigger
-    a Shopee API call."""
-    if _shopee_auth.load_tokens(SHOPEE_ONBIE_SHOP_ID) is None:
-        return  # not connected — nothing to sync
-
+    """For each connected shop in SHOPEE_SHOPS, run _sync_one_shop() only if
+    at least SHOPEE_AUTO_SYNC_INTERVAL_SECONDS have passed since THAT shop's
+    last sync attempt (per-shop, so one shop's failure or success never
+    changes another shop's schedule). This, plus the fragment's own
+    run_every timer below, is what prevents duplicate API calls on every
+    normal Streamlit rerun — a plain page interaction in between auto-sync
+    ticks does not re-trigger a Shopee API call."""
     import time as _time_check
-    _last_sync_ts = st.session_state.get("_last_shopee_sync_ts", 0)
-    if _time_check.time() - _last_sync_ts < SHOPEE_AUTO_SYNC_INTERVAL_SECONDS:
-        return  # interval not elapsed yet
-
-    _sync_shopee_orders_now()
+    for _label, _shop_id in SHOPEE_SHOPS.items():
+        if _shopee_auth.load_tokens(_shop_id) is None:
+            continue  # not connected — nothing to sync
+        _last_attempt = _get_shop_sync_status(_shop_id)["last_attempt_ts"]
+        if _time_check.time() - _last_attempt < SHOPEE_AUTO_SYNC_INTERVAL_SECONDS:
+            continue  # interval not elapsed yet
+        _sync_one_shop(_label, _shop_id)
 
 
 @st.fragment(run_every=SHOPEE_AUTO_SYNC_INTERVAL_SECONDS)
@@ -464,6 +630,8 @@ def _shopee_auto_sync_fragment():
 # ---- Shopee Integration sidebar ----
 # Entirely in the sidebar so it never interferes with the packing UI layout.
 # The packing checker works normally regardless of Shopee connection status.
+# One block per shop in SHOPEE_SHOPS (Onbie only for now); with a single shop
+# the layout is the same as the original single-shop sidebar.
 with st.sidebar:
     st.header("🟠 Shopee Integration")
 
@@ -471,58 +639,96 @@ with st.sidebar:
     # keeps ticking on every render of this sidebar (i.e. always).
     _shopee_auto_sync_fragment()
 
-    _tokens = _shopee_auth.load_tokens(SHOPEE_ONBIE_SHOP_ID)
+    # One-time notice left by the OAuth callback (it reruns right after
+    # saving tokens, which would wipe anything rendered there).
+    _oauth_notice = st.session_state.pop("_shopee_oauth_notice", None)
+    if _oauth_notice:
+        getattr(st, _oauth_notice[0])(_oauth_notice[1])
 
-    if _tokens:
-        st.success("✅ Shopee Terhubung")
-        st.caption(f"Shop ID: {_tokens.get('shop_id', '-')}")
+    _multi_shop = len(SHOPEE_SHOPS) > 1
+    _connected_shops = []
 
-        # Show token expiry info if available
-        _fetch_time = _tokens.get("fetch_time", 0)
-        _expire_in  = _tokens.get("expire_in", 0)
-        if _fetch_time and _expire_in:
-            _expire_ts = _fetch_time + _expire_in
-            _expire_dt = datetime.utcfromtimestamp(_expire_ts).strftime("%Y-%m-%d %H:%M UTC")
-            st.caption(f"Token expires: {_expire_dt}")
-            if _shopee_auth.is_token_expired(_tokens):
-                st.warning("⚠️ Token sudah expired atau hampir expired. Klik Reconnect.")
+    for _shop_label, _shop_id in SHOPEE_SHOPS.items():
+        _what = f"Shopee ({_shop_label})" if _multi_shop else "Shopee"
+        if _multi_shop:
+            st.markdown(f"**{_shop_label}**")
 
-        with st.expander("Token Details"):
-            st.json({
-                "access_token":  _shopee_auth.mask_token(_tokens.get("access_token", "")),
-                "refresh_token": _shopee_auth.mask_token(_tokens.get("refresh_token", "")),
-                "expire_in":     _tokens.get("expire_in"),
-                "fetch_time":    _tokens.get("fetch_time"),
-                "shop_id":       _tokens.get("shop_id"),
-            })
+        _tokens = _shopee_auth.load_tokens(_shop_id)
 
-        # Shopee rotates refresh_token on each refresh. The stored tokens
-        # (Supabase, or tokens.json when Supabase isn't configured) always
-        # have the current one, but Streamlit secrets can only be updated
-        # manually (an app can't write to its own Secrets at runtime), so
-        # flag it here when they've drifted apart — otherwise the NEXT
-        # container restart would bootstrap from the now-stale secret value
-        # and fail, silently landing back on "Belum terhubung ke Shopee".
-        try:
-            _secret_refresh_token = st.secrets["shopee_tokens"]["refresh_token"]
-            if _secret_refresh_token and _secret_refresh_token != _tokens.get("refresh_token"):
-                st.info(
-                    "🔁 Refresh token sudah berubah sejak terakhir di-set di Secrets. "
-                    "Update nilai `refresh_token` di Streamlit Cloud → Settings → Secrets "
-                    "(lihat Token Details di atas) supaya koneksi tetap bertahan setelah restart berikutnya."
-                )
-        except KeyError:
-            pass  # no [shopee_tokens] secret configured — nothing to compare
+        if _tokens:
+            _connected_shops.append((_shop_label, _shop_id))
+            st.success("✅ Shopee Terhubung")
+            st.caption(f"Shop ID: {_tokens.get('shop_id', '-')}")
 
-        if st.button("🔄 Reconnect Shopee", key="btn_reconnect_shopee"):
-            try:
-                # Redirect URL must match exactly what is registered in Shopee Open Platform.
-                _redirect_url = "https://onbie-packing.streamlit.app"
-                _auth_url = _shopee_auth.generate_auth_url(_redirect_url)
-                st.link_button("🔄 Klik di sini untuk reconnect ke Shopee", _auth_url)
-            except ValueError as e:
-                st.error(f"❌ {e}")
+            # Show token expiry info if available
+            _fetch_time = _tokens.get("fetch_time", 0)
+            _expire_in  = _tokens.get("expire_in", 0)
+            if _fetch_time and _expire_in:
+                _expire_ts = _fetch_time + _expire_in
+                _expire_dt = datetime.utcfromtimestamp(_expire_ts).strftime("%Y-%m-%d %H:%M UTC")
+                st.caption(f"Token expires: {_expire_dt}")
+                if _shopee_auth.is_token_expired(_tokens):
+                    st.warning("⚠️ Token sudah expired atau hampir expired. Klik Reconnect.")
 
+            with st.expander("Token Details"):
+                st.json({
+                    "access_token":  _shopee_auth.mask_token(_tokens.get("access_token", "")),
+                    "refresh_token": _shopee_auth.mask_token(_tokens.get("refresh_token", "")),
+                    "expire_in":     _tokens.get("expire_in"),
+                    "fetch_time":    _tokens.get("fetch_time"),
+                    "shop_id":       _tokens.get("shop_id"),
+                })
+
+            # Shopee rotates refresh_token on each refresh. The stored tokens
+            # (Supabase, or tokens.json when Supabase isn't configured) always
+            # have the current one, but Streamlit secrets can only be updated
+            # manually (an app can't write to its own Secrets at runtime), so
+            # flag it here when they've drifted apart — otherwise the NEXT
+            # container restart would bootstrap from the now-stale secret value
+            # and fail, silently landing back on "Belum terhubung ke Shopee".
+            # The [shopee_tokens] secret is Onbie's only.
+            if _shop_id == SHOPEE_ONBIE_SHOP_ID:
+                try:
+                    _secret_refresh_token = st.secrets["shopee_tokens"]["refresh_token"]
+                    if _secret_refresh_token and _secret_refresh_token != _tokens.get("refresh_token"):
+                        st.info(
+                            "🔁 Refresh token sudah berubah sejak terakhir di-set di Secrets. "
+                            "Update nilai `refresh_token` di Streamlit Cloud → Settings → Secrets "
+                            "(lihat Token Details di atas) supaya koneksi tetap bertahan setelah restart berikutnya."
+                        )
+                except KeyError:
+                    pass  # no [shopee_tokens] secret configured — nothing to compare
+
+            if st.button(f"🔄 Reconnect {_what}", key=f"btn_reconnect_shopee_{_shop_id}"):
+                try:
+                    # Redirect URL must match exactly what is registered in Shopee Open Platform.
+                    _redirect_url = "https://onbie-packing.streamlit.app"
+                    _auth_url = _shopee_auth.generate_auth_url(_redirect_url)
+                    st.link_button(f"🔄 Klik di sini untuk reconnect ke {_what}", _auth_url)
+                except ValueError as e:
+                    st.error(f"❌ {e}")
+
+        else:
+            st.warning("Belum terhubung ke Shopee")
+
+            if st.button(f"🟠 Connect {_what}", key=f"btn_connect_shopee_{_shop_id}"):
+                try:
+                    # Redirect URL must match exactly what is registered in Shopee Open Platform.
+                    _redirect_url = "https://onbie-packing.streamlit.app"
+                    _auth_url = _shopee_auth.generate_auth_url(_redirect_url)
+                    st.link_button(f"🟠 Klik di sini untuk connect ke {_what}", _auth_url)
+                except ValueError as e:
+                    st.error(f"❌ {e}")
+
+            st.caption(
+                "Klik tombol di atas untuk mengizinkan Onbie Packing System "
+                "mengakses data order Shopee kamu."
+            )
+
+        if _multi_shop:
+            st.divider()
+
+    if _connected_shops:
         # ----------------------------------------------------------------
         # Phase 1 — Shopee direct packing queue sync
         # ----------------------------------------------------------------
@@ -531,15 +737,29 @@ with st.sidebar:
             _n_synced = st.session_state["shopee_orders_df"]["No. Pesanan"].nunique()
             st.success(f"✅ Packing queue: {_n_synced} order dari Shopee")
 
-        _last_sync_ts = st.session_state.get("_last_shopee_sync_ts")
-        if _last_sync_ts:
-            _last_sync_wib = datetime.fromtimestamp(_last_sync_ts, tz=ZoneInfo("Asia/Jakarta"))
-            st.caption(
-                "Last sync: "
-                + _last_sync_wib.strftime("%Y-%m-%d %H:%M:%S") + " WIB"
+        _order_conflicts = st.session_state.get("_shopee_order_conflicts") or []
+        if _order_conflicts:
+            st.warning(
+                "⚠️ Nomor pesanan yang sama muncul di lebih dari satu shop: "
+                + ", ".join(_order_conflicts[:5])
+                + (" …" if len(_order_conflicts) > 5 else "")
             )
-        else:
-            st.caption("Last sync: belum pernah")
+
+        _all_shop_status = st.session_state.get("_shopee_shop_status", {})
+        for _shop_label, _shop_id in _connected_shops:
+            _shop_state = _all_shop_status.get(_shop_id) or {}
+            _lbl = f" ({_shop_label})" if _multi_shop else ""
+            _last_ok_ts = _shop_state.get("last_ok_ts")
+            if _last_ok_ts:
+                _last_sync_wib = datetime.fromtimestamp(_last_ok_ts, tz=ZoneInfo("Asia/Jakarta"))
+                st.caption(
+                    f"Last sync{_lbl}: "
+                    + _last_sync_wib.strftime("%Y-%m-%d %H:%M:%S") + " WIB"
+                )
+            else:
+                st.caption(f"Last sync{_lbl}: belum pernah")
+            if _shop_state.get("error"):
+                st.caption((f"{_shop_label}: " if _multi_shop else "") + _shop_state["error"])
         st.caption(f"Auto-sync setiap {SHOPEE_AUTO_SYNC_INTERVAL_SECONDS // 60} menit selama app terbuka.")
 
         if st.button("🔄 Sync Now", key="btn_sync_shopee_orders"):
@@ -553,23 +773,6 @@ with st.sidebar:
         # ----------------------------------------------------------------
         # END Phase 1
         # ----------------------------------------------------------------
-
-    else:
-        st.warning("Belum terhubung ke Shopee")
-
-        if st.button("🟠 Connect Shopee", key="btn_connect_shopee"):
-            try:
-                # Redirect URL must match exactly what is registered in Shopee Open Platform.
-                _redirect_url = "https://onbie-packing.streamlit.app"
-                _auth_url = _shopee_auth.generate_auth_url(_redirect_url)
-                st.link_button("🟠 Klik di sini untuk connect ke Shopee", _auth_url)
-            except ValueError as e:
-                st.error(f"❌ {e}")
-
-        st.caption(
-            "Klik tombol di atas untuk mengizinkan Onbie Packing System "
-            "mengakses data order Shopee kamu."
-        )
 
     st.divider()
 
@@ -637,12 +840,14 @@ def load_shopee_orders():
         "Nama Variasi", "Jumlah", "Berat (Kg)", "Status Pesanan",
         "Waktu Pesanan Dibuat", "Tenggat Pengiriman", "Antar ke counter/ pick-up",
         "Ekspedisi", "Catatan dari Pembeli", "Platform", "Toko", "Sumber",
+        "Shop ID",
     ]
     if not os.path.exists(SHOPEE_DATA_FILE):
         return pd.DataFrame(columns=_COLS)
     df = pd.read_csv(SHOPEE_DATA_FILE)
     df.columns = [str(c).strip() for c in df.columns]
-    return df
+    # Older files have no Shop ID (all rows were Onbie's) — fill it in.
+    return _normalize_shop_id_column(df)
 
 
 @st.cache_data
