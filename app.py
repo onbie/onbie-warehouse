@@ -4,28 +4,9 @@ import os
 import streamlit.components.v1 as components
 from datetime import datetime
 from zoneinfo import ZoneInfo
-import time  # TEMPORARY: for profiling instrumentation, remove with the rest
 
 st.set_page_config(page_title="Shopee Packing Checker", layout="wide")
 st.title("📦 Shopee Packing Checker")
-
-# ---- TEMPORARY: profiling instrumentation --------------------------------
-# Records wall-clock elapsed time for each named section on THIS rerun only.
-# Displayed at the very end of the script in an expander. Remove this whole
-# block, every _perf_mark(...) call, and the display block at the bottom
-# once profiling is done — none of this affects app behavior, only timing.
-_PERF_LOG = []
-_perf_prev = time.perf_counter()
-
-
-def _perf_mark(section_name):
-    """Record elapsed time since the previous _perf_mark() call (or script
-    start) under section_name. Call this immediately AFTER a section of
-    code finishes."""
-    global _perf_prev
-    _now = time.perf_counter()
-    _PERF_LOG.append((section_name, _now - _perf_prev))
-    _perf_prev = _now
 
 DATA_FILE = "data/orders_master.csv"
 PACKED_FILE = "packed.csv"
@@ -160,7 +141,6 @@ def _handle_shopee_oauth():
         st.error(f"❌ Unexpected error saat OAuth: {e}")
 
 _handle_shopee_oauth()
-_perf_mark("startup_secrets_oauth")
 
 
 def adapt_shopee_api_to_df(orders_with_detail, shop_name="", channel_service_types=None):
@@ -610,114 +590,6 @@ with st.sidebar:
                     st.error(_message)
 
         # ----------------------------------------------------------------
-        # TEMPORARY — v2.shop.get_shop_info diagnostic, for sending to
-        # Shopee support. Makes its own raw signed request (reusing
-        # existing shopee_auth/shopee_api helper functions for token +
-        # signature — no auth/signing logic duplicated or changed, and no
-        # permanent behavior/UI change anywhere else). Displays request
-        # timestamp, Partner ID, Shop ID, HTTP status, Request ID, and the
-        # raw response — all in one st.code() block so it can be copied in
-        # a single click. NEVER shows partner key, secret, access token,
-        # refresh token, or signature.
-        # ----------------------------------------------------------------
-        if st.button("🧪 Diagnose get_shop_info", key="btn_diag_get_shop_info"):
-            try:
-                import shopee_api as _diag_shopee_api
-                import shopee_auth as _diag_shopee_auth
-                import requests as _diag_requests
-                import time as _diag_time
-                import json as _diag_json
-                from datetime import datetime as _diag_datetime, timezone as _diag_timezone
-
-                _diag_access_token = _diag_shopee_auth.get_valid_access_token()
-                _diag_tokens = _diag_shopee_auth.load_tokens()
-                _diag_shop_id = int(_diag_tokens.get("shop_id", 0)) if _diag_tokens else 0
-                _diag_partner_id, _diag_partner_key = _diag_shopee_auth.get_credentials()
-                _diag_timestamp = int(_diag_time.time())
-                _diag_timestamp_iso = _diag_datetime.fromtimestamp(
-                    _diag_timestamp, tz=_diag_timezone.utc
-                ).strftime("%Y-%m-%d %H:%M:%S UTC")
-
-                _diag_path = "/api/v2/shop/get_shop_info"
-                _diag_sign = _diag_shopee_api._generate_protected_signature(
-                    _diag_partner_id, _diag_path, _diag_timestamp,
-                    _diag_access_token, _diag_shop_id, _diag_partner_key,
-                )
-                _diag_query_params = {
-                    "partner_id":   _diag_partner_id,
-                    "timestamp":    _diag_timestamp,
-                    "sign":         _diag_sign,
-                    "access_token": _diag_access_token,
-                    "shop_id":      _diag_shop_id,
-                }
-                _diag_url = f"{_diag_shopee_api.SHOPEE_HOST}{_diag_path}"
-                _diag_resp = _diag_requests.get(_diag_url, params=_diag_query_params, timeout=15)
-                try:
-                    _diag_body = _diag_resp.json()
-                except ValueError:
-                    _diag_body = {"_raw_text": _diag_resp.text}
-
-                # Request ID: prefer the JSON body's own "request_id" field
-                # (Shopee's standard field for this); fall back to checking
-                # likely HTTP header names if the body doesn't have one.
-                _diag_request_id = _diag_body.get("request_id")
-                _diag_request_id_source = "body"
-                if not _diag_request_id:
-                    _diag_header_candidates = [
-                        "X-Request-Id", "X-Request-ID", "Request-Id", "Request-ID",
-                        "X-Trace-Id", "X-Trace-ID", "X-Bff-Trace-Id", "Trace-Id",
-                    ]
-                    for _header_name in _diag_header_candidates:
-                        _header_value = _diag_resp.headers.get(_header_name)
-                        if _header_value:
-                            _diag_request_id = _header_value
-                            _diag_request_id_source = f"header: {_header_name}"
-                            break
-                if not _diag_request_id:
-                    _diag_request_id = "(not found in body or headers)"
-                    _diag_request_id_source = "none"
-
-                _diag_report_lines = [
-                    "=== v2.shop.get_shop_info diagnostic ===",
-                    f"Request timestamp : {_diag_timestamp_iso} (unix: {_diag_timestamp})",
-                    f"Partner ID         : {_diag_partner_id}",
-                    f"Shop ID            : {_diag_shop_id}",
-                    f"HTTP status        : {_diag_resp.status_code}",
-                    f"Request ID         : {_diag_request_id} (source: {_diag_request_id_source})",
-                    "",
-                    "Raw response body:",
-                    _diag_json.dumps(_diag_body, indent=2, ensure_ascii=False),
-                ]
-                _diag_report_text = "\n".join(_diag_report_lines)
-
-                st.caption("Copy the block below and send to Shopee support:")
-                st.code(_diag_report_text, language="text")
-            except Exception as e:
-                st.error(f"❌ get_shop_info diagnostic failed: {type(e).__name__}: {e}")
-        # ----------------------------------------------------------------
-        # END TEMPORARY — v2.shop.get_shop_info diagnostic
-        # ----------------------------------------------------------------
-
-        # ----------------------------------------------------------------
-        # TEMPORARY — Cloud Outbound IP diagnostic. Shows the public IP
-        # this app's outbound requests appear to come from (as seen by an
-        # external service), useful for allowlisting with Shopee or
-        # debugging network-level issues. No Shopee API/auth logic
-        # involved at all — a plain outbound GET to api.ipify.org.
-        # ----------------------------------------------------------------
-        if st.button("🧪 TEMPORARY — Cloud Outbound IP", key="btn_diag_outbound_ip"):
-            try:
-                import requests as _diag_ip_requests
-                _diag_ip_resp = _diag_ip_requests.get("https://api.ipify.org", params={"format": "text"}, timeout=10)
-                st.caption("TEMPORARY — Cloud Outbound IP")
-                st.code(_diag_ip_resp.text.strip(), language="text")
-            except Exception as e:
-                st.error(f"❌ Outbound IP check failed: {type(e).__name__}: {e}")
-        # ----------------------------------------------------------------
-        # END TEMPORARY — Cloud Outbound IP diagnostic
-        # ----------------------------------------------------------------
-
-        # ----------------------------------------------------------------
         # END Phase 1
         # ----------------------------------------------------------------
 
@@ -743,8 +615,6 @@ with st.sidebar:
         )
 
     st.divider()
-
-_perf_mark("sidebar_and_auto_sync")
 
 CANCELLED_KEYWORDS = ["batal", "cancel"]
 # Only orders whose status CONTAINS this phrase may be packed
@@ -1082,8 +952,6 @@ else:
         if st.session_state.not_found_query:
             big_banner(["❌ ORDER TIDAK DITEMUKAN", "Cek nomor pesanan / nomor resi"], "#b71c1c")
 
-        _perf_mark("search_and_filter")
-
         # ---- Render currently displayed order (persists across reruns) ----
         if st.session_state.displayed_order:
             order_number = st.session_state.displayed_order
@@ -1246,8 +1114,6 @@ else:
 
     scan_and_order_section()
 
-    _perf_mark("order_detail_rendering")
-
     # Tighter vertical gap here specifically (search area -> metrics),
     # via a low-margin <hr> instead of st.divider()'s default spacing.
     # Scoped to this one spot only — no global CSS, other dividers/sections
@@ -1345,8 +1211,6 @@ else:
             hide_index=True,
         )
 
-    _perf_mark("order_belum_diverifikasi")
-
     # ---- Daily packing report (all orders packed today) ----
     st.divider()
     st.write("### 📅 Laporan Packing Hari Ini")
@@ -1421,8 +1285,6 @@ else:
         # on every row. Now built via the same shared build_rowspan_rows_html()
         # the on-screen table above uses, with its own print-oriented CSS
         # below (Arial/white, separate from the on-screen dark styling).
-        _perf_mark("daily_packing_report_onscreen")
-
         _report_rows_for_print = report_rows.copy()
         _report_rows_for_print["Jumlah"] = _report_rows_for_print["Jumlah"].apply(
             lambda v: int(v) if pd.notna(v) else 0
@@ -1481,8 +1343,6 @@ else:
                 height=0,
             )
 
-        _perf_mark("print_html_generation")
-
     # ---- Packing History ----
     st.divider()
     st.write("### 📊 Packing History")
@@ -1532,14 +1392,3 @@ else:
         chart_data = daily_counts.sort_values("Date").copy()
         chart_data["Date"] = chart_data["Date"].astype(str)
         st.line_chart(chart_data.set_index("Date")["Packed Count"], use_container_width=True)
-
-_perf_mark("packing_history_chart")
-
-# ---- TEMPORARY: display profiling results ---------------------------------
-with st.sidebar:
-    with st.expander("⏱️ TEMPORARY: Section Timings (this rerun)"):
-        _perf_total = sum(t for _, t in _PERF_LOG)
-        for _section, _elapsed in _PERF_LOG:
-            st.write(f"**{_section}:** {_elapsed * 1000:.1f} ms")
-        st.write(f"**TOTAL:** {_perf_total * 1000:.1f} ms")
-# ---- END TEMPORARY: display profiling results ------------------------------
