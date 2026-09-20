@@ -341,6 +341,14 @@ def exchange_code_for_token(code: str, shop_id: int) -> Dict:
 
 SUPABASE_TABLE = "shopee_tokens"
 
+# Raised when shop_id=None is used while more than one shop is connected.
+# shop_id=None is only allowed when there is exactly ONE connected shop
+# (the original single-shop behavior); it must never silently pick a shop.
+_MULTI_SHOP_ERROR = (
+    "Multiple Shopee shops are connected — an explicit shop_id is required. "
+    "shop_id=None is only allowed when exactly one shop is connected."
+)
+
 _supabase_client = None
 _supabase_client_init_attempted = False
 
@@ -372,27 +380,39 @@ def _get_supabase_client():
         return None
 
 
-def _supabase_load_tokens() -> Optional[Dict]:
-    """Fetch the most recently updated token row from Supabase. Returns
-    None if Supabase isn't configured/reachable or no row exists yet."""
+def _supabase_load_tokens(shop_id: Optional[int] = None) -> Optional[Dict]:
+    """Fetch a token row from Supabase.
+
+    shop_id given -> only that shop's row (None if it has no row yet).
+    shop_id=None  -> allowed only when exactly ONE shop is stored: returns
+                     that row (identical to the original single-shop
+                     behavior). With more than one row this raises
+                     RuntimeError instead of silently picking the most
+                     recently fetched shop.
+
+    Returns None if Supabase isn't configured/reachable or no row exists
+    yet. Connection/query errors are best-effort (logged, None) — the
+    multi-shop ambiguity error is deliberately NOT swallowed."""
     client = _get_supabase_client()
     if client is None:
         return None
     try:
-        result = (
-            client.table(SUPABASE_TABLE)
-            .select("shop_id, access_token, refresh_token, expire_in, fetch_time, partner_id")
-            .order("fetch_time", desc=True)
-            .limit(1)
-            .execute()
+        query = client.table(SUPABASE_TABLE).select(
+            "shop_id, access_token, refresh_token, expire_in, fetch_time, partner_id"
         )
+        if shop_id is not None:
+            query = query.eq("shop_id", shop_id)
+        # limit(2) is enough to tell "exactly one row" apart from "several".
+        result = query.order("fetch_time", desc=True).limit(2).execute()
         rows = result.data or []
-        if not rows:
-            return None
-        return dict(rows[0])
     except Exception as e:
         logger.warning("Supabase token load failed, falling back to tokens.json: %s", e)
         return None
+    if shop_id is None and len(rows) > 1:
+        raise RuntimeError(_MULTI_SHOP_ERROR)
+    if not rows:
+        return None
+    return dict(rows[0])
 
 
 def _supabase_save_tokens(tokens: Dict) -> None:
@@ -576,16 +596,37 @@ def bootstrap_tokens_from_secrets(
     return _write_tokens_file(tokens)
 
 
-def load_tokens() -> Optional[Dict]:
+def _record_matches_shop(tokens: Dict, shop_id: int) -> bool:
+    """True if a token record belongs to shop_id (tolerates str/int)."""
+    try:
+        return int(tokens.get("shop_id") or 0) == int(shop_id)
+    except (TypeError, ValueError):
+        return False
+
+
+def load_tokens(shop_id: Optional[int] = None) -> Optional[Dict]:
     """Load saved tokens. Supabase (if configured and reachable) is checked
     first — it's the durable, cross-restart, cross-rotation source of
     truth. Falls back to the local tokens.json file for local development
     or if Supabase is unreachable/unconfigured.
 
+    Args:
+        shop_id: which shop's tokens to load. None is allowed only when
+                 exactly one shop is connected (original single-shop
+                 behavior); with several shops connected it raises
+                 RuntimeError — pass an explicit shop_id. A tokens.json
+                 record is only used if it belongs to the requested shop.
+
     Returns:
         Token dict if found in Supabase or tokens.json, otherwise None.
+
+    Raises:
+        RuntimeError: shop_id is None but more than one shop is connected.
     """
-    supabase_tokens = _supabase_load_tokens()
+    if shop_id is not None:
+        shop_id = int(shop_id)
+
+    supabase_tokens = _supabase_load_tokens(shop_id)
     if supabase_tokens is not None:
         return supabase_tokens
 
@@ -596,10 +637,16 @@ def load_tokens() -> Optional[Dict]:
         with open(TOKENS_FILE) as f:
             tokens = json.load(f)
         logger.debug("tokens.json loaded successfully.")
-        return tokens
     except (json.JSONDecodeError, OSError) as e:
         logger.warning("Failed to load tokens.json: %s", e)
         return None
+
+    if shop_id is not None and not _record_matches_shop(tokens, shop_id):
+        logger.info(
+            "tokens.json holds a different shop — ignoring it for shop_id=%s.", shop_id
+        )
+        return None
+    return tokens
 
 
 # ---------------------------------------------------------------------------
@@ -785,29 +832,40 @@ def refresh_access_token(tokens: Dict) -> Dict:
 # High-level token accessor
 # ---------------------------------------------------------------------------
 
-def get_valid_access_token() -> str:
-    """Return a valid Shopee access token, refreshing automatically if needed.
+def get_valid_tokens(shop_id: Optional[int] = None) -> Dict:
+    """Return ONE valid Shopee token record, refreshing automatically if needed.
+
+    The whole record is returned (access_token + shop_id + partner_id
+    together) so callers sign/send a request with an access_token and
+    shop_id that are guaranteed to come from the SAME shop's record.
 
     Load-check-refresh cycle:
-    1. Load tokens from tokens.json.
+    1. Load this shop's tokens (Supabase first, tokens.json fallback).
     2. If missing → raise RuntimeError (re-auth required).
-    3. If expired or within TOKEN_EXPIRY_BUFFER_SECONDS of expiry → refresh.
-    4. Save refreshed tokens back to tokens.json.
-    5. Return the access_token string.
+    3. If expired or within TOKEN_EXPIRY_BUFFER_SECONDS of expiry → refresh
+       using THIS record's refresh_token/shop_id.
+    4. Persist the refreshed record (Supabase row for this shop_id, and
+       tokens.json).
+    5. Return the record.
+
+    Args:
+        shop_id: which shop. None is allowed only when exactly one shop is
+                 connected; otherwise RuntimeError (see load_tokens()).
 
     Returns:
-        access_token string, guaranteed to be valid for at least
+        Token dict whose access_token is valid for at least
         TOKEN_EXPIRY_BUFFER_SECONDS more seconds (barring Shopee-side
         revocation).
 
     Raises:
-        RuntimeError: tokens.json not found, or refresh failed and the
-                      caller should prompt re-authorization.
+        RuntimeError: no saved tokens, more than one shop connected while
+                      shop_id is None, or refresh failed and the caller
+                      should prompt re-authorization.
         ValueError:   credentials missing from os.environ.
         requests.*:   network errors during refresh (propagated from
                       refresh_access_token()).
     """
-    tokens = load_tokens()
+    tokens = load_tokens(shop_id)
 
     if tokens is None:
         raise RuntimeError(
@@ -817,20 +875,28 @@ def get_valid_access_token() -> str:
     if is_token_expired(tokens):
         logger.info("Access token expired or near expiry — refreshing...")
         data = refresh_access_token(tokens)
-        shop_id = tokens.get("shop_id", 0)
-        tokens  = save_tokens(data, shop_id)
+        record_shop_id = tokens.get("shop_id", 0)
+        tokens  = save_tokens(data, record_shop_id)
         logger.info("Token refreshed and saved.")
     else:
         logger.debug("Access token is still valid — no refresh needed.")
 
-    access_token = tokens.get("access_token", "")
-    if not access_token:
+    if not tokens.get("access_token", ""):
         raise RuntimeError(
             "access_token is empty after load/refresh cycle. "
             "Re-authorize via Connect Shopee."
         )
 
-    return access_token
+    return tokens
+
+
+def get_valid_access_token(shop_id: Optional[int] = None) -> str:
+    """Return a valid Shopee access token, refreshing automatically if needed.
+
+    Thin wrapper over get_valid_tokens(); see there for the shop_id rules
+    and the errors raised.
+    """
+    return get_valid_tokens(shop_id)["access_token"]
 
 
 # ---------------------------------------------------------------------------

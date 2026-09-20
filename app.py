@@ -11,6 +11,9 @@ st.title("📦 Shopee Packing Checker")
 DATA_FILE = "data/orders_master.csv"
 PACKED_FILE = "packed.csv"
 SHOPEE_DATA_FILE = "data/shopee_orders.csv"
+# Onbie's Shopee shop ID. Token/API calls are explicitly shop-scoped
+# (shopee_auth / shopee_api take shop_id); Onbie is the only connected shop for now.
+SHOPEE_ONBIE_SHOP_ID = 1272241861
 SNAPSHOT_FILE = "packed_snapshots.csv"
 SNAPSHOT_COLUMNS = [
     "order_number", "packed_at", "No. Pesanan", "Username (Pembeli)",
@@ -86,7 +89,7 @@ _inject_supabase_secrets()
 # configured. It's a no-op whenever tokens.json OR Supabase already has
 # tokens, which is the normal case once Supabase is set up.
 def _bootstrap_shopee_tokens_from_secrets():
-    if _shopee_auth.load_tokens() is not None:
+    if _shopee_auth.load_tokens(SHOPEE_ONBIE_SHOP_ID) is not None:
         return  # Supabase or tokens.json already has tokens — nothing to bootstrap
 
     try:
@@ -104,7 +107,7 @@ def _bootstrap_shopee_tokens_from_secrets():
         # Force an immediate refresh so the sidebar shows "Terhubung" with a
         # real access token right away, instead of a stale/expired-looking
         # state until the first Shopee API call happens to trigger it.
-        _shopee_auth.get_valid_access_token()
+        _shopee_auth.get_valid_access_token(SHOPEE_ONBIE_SHOP_ID)
     except Exception:
         # Best-effort bootstrap only — any failure (bad/rotated refresh
         # token, network issue, misconfigured secret) just falls back to
@@ -323,7 +326,7 @@ def _get_shopee_shop_name():
         return st.session_state["_shopee_shop_name"]
     try:
         import shopee_api as _shopee_api_shop
-        info = _shopee_api_shop.get_shop_info()
+        info = _shopee_api_shop.get_shop_info(shop_id=SHOPEE_ONBIE_SHOP_ID)
         shop_name = str(info.get("shop_name", "") or "").strip()
         if shop_name:
             st.session_state["_shopee_shop_name"] = shop_name
@@ -346,7 +349,7 @@ def _get_shopee_channel_service_types():
         return st.session_state["_shopee_channel_service_types"]
     try:
         import shopee_api as _shopee_api_channels
-        info = _shopee_api_channels.get_channel_list()
+        info = _shopee_api_channels.get_channel_list(shop_id=SHOPEE_ONBIE_SHOP_ID)
         channel_list = info.get("logistics_channel_list", [])
         if not isinstance(channel_list, list):
             channel_list = []
@@ -385,6 +388,7 @@ def _sync_shopee_orders_now():
             time_range_field="create_time",
             order_status="READY_TO_SHIP",
             detail_optional_fields=["item_list", "buyer_username", "recipient_address", "note", "shipping_carrier", "package_list"],
+            shop_id=SHOPEE_ONBIE_SHOP_ID,
         )
         _raw_proc = _shopee_api_sync.get_orders_with_detail(
             time_from=_time_from_sync,
@@ -392,6 +396,7 @@ def _sync_shopee_orders_now():
             time_range_field="create_time",
             order_status="PROCESSED",
             detail_optional_fields=["item_list", "buyer_username", "recipient_address", "note", "shipping_carrier", "package_list"],
+            shop_id=SHOPEE_ONBIE_SHOP_ID,
         )
         # Deduplicate by order_sn — keep first occurrence
         _seen = set()
@@ -435,7 +440,7 @@ def _maybe_auto_sync_shopee_orders():
     is what prevents duplicate API calls on every normal Streamlit rerun —
     a plain page interaction in between auto-sync ticks does not re-trigger
     a Shopee API call."""
-    if _shopee_auth.load_tokens() is None:
+    if _shopee_auth.load_tokens(SHOPEE_ONBIE_SHOP_ID) is None:
         return  # not connected — nothing to sync
 
     import time as _time_check
@@ -466,7 +471,7 @@ with st.sidebar:
     # keeps ticking on every render of this sidebar (i.e. always).
     _shopee_auto_sync_fragment()
 
-    _tokens = _shopee_auth.load_tokens()
+    _tokens = _shopee_auth.load_tokens(SHOPEE_ONBIE_SHOP_ID)
 
     if _tokens:
         st.success("✅ Shopee Terhubung")

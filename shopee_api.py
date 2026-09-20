@@ -8,8 +8,8 @@ Python data structures. Does NOT write to any file, database, or CSV.
 Does NOT import or depend on Streamlit.
 
 Reuses authentication and token management from shopee_auth.py:
-    - get_valid_access_token()  — returns a valid access_token, refreshing if needed
-    - load_tokens()             — provides shop_id and partner_id
+    - get_valid_tokens(shop_id) — returns ONE valid token record (access_token,
+                                  shop_id, partner_id together), refreshing if needed
     - get_credentials()         — provides partner_id and partner_key for signing
 
 Protected API signature (different from OAuth/auth endpoints):
@@ -113,7 +113,12 @@ def _generate_protected_signature(
 # Authenticated request helper
 # ---------------------------------------------------------------------------
 
-def _shopee_get(api_path: str, params: Dict, unwrap_response: bool = True) -> Dict:
+def _shopee_get(
+    api_path: str,
+    params: Dict,
+    unwrap_response: bool = True,
+    shop_id: Optional[int] = None,
+) -> Dict:
     """Send an authenticated GET request to a Shopee v2 protected endpoint.
 
     Handles:
@@ -137,6 +142,11 @@ def _shopee_get(api_path: str, params: Dict, unwrap_response: bool = True) -> Di
                   TOP LEVEL of the JSON body, with "response" left as {})
                   don't follow that convention. Pass False to get the full,
                   unmodified top-level dict instead.
+        shop_id:  Optional. Which connected shop to call as. None is only
+                  allowed when exactly one shop is connected (original
+                  single-shop behavior); with several, pass it explicitly
+                  (shopee_auth raises otherwise). The access_token and the
+                  shop_id used for signing come from the SAME token record.
 
     Returns:
         By default, the "response" sub-dict from Shopee's JSON body, i.e.
@@ -151,15 +161,11 @@ def _shopee_get(api_path: str, params: Dict, unwrap_response: bool = True) -> Di
         requests.HTTPError:    HTTP 4xx or 5xx from Shopee.
         requests.ConnectionError: network unreachable.
     """
-    # Get a valid access token (refreshes automatically if near expiry).
-    access_token = shopee_auth.get_valid_access_token()
-
-    # Load shop_id and partner_id from saved tokens.
-    tokens = shopee_auth.load_tokens()
-    if tokens is None:
-        raise RuntimeError(
-            "No saved tokens found. Authorize Shopee via Connect Shopee first."
-        )
+    # Resolve ONE token record (auto-refreshed if near expiry) and take BOTH
+    # access_token and shop_id from that same record, so they can never come
+    # from two different shops.
+    tokens = shopee_auth.get_valid_tokens(shop_id)
+    access_token = tokens.get("access_token", "")
     shop_id = int(tokens.get("shop_id", 0))
     if not shop_id:
         raise RuntimeError(
@@ -249,7 +255,7 @@ def _shopee_get(api_path: str, params: Dict, unwrap_response: bool = True) -> Di
     return response_data if unwrap_response else data
 
 
-def _shopee_post(api_path: str, body: Dict) -> Dict:
+def _shopee_post(api_path: str, body: Dict, shop_id: Optional[int] = None) -> Dict:
     """Send an authenticated POST request to a Shopee v2 protected endpoint.
 
     Same authentication and error handling as _shopee_get(), but uses POST
@@ -260,17 +266,14 @@ def _shopee_post(api_path: str, body: Dict) -> Dict:
         api_path: Shopee API path, e.g. "/api/v2/order/get_order_detail"
         body:     JSON body dict specific to the endpoint.
                   Do NOT include partner_id, shop_id, etc. — added automatically.
+        shop_id:  Optional. Which connected shop to call as — see _shopee_get().
 
     Returns:
         The "response" sub-dict from Shopee's JSON body.
     """
-    access_token = shopee_auth.get_valid_access_token()
-
-    tokens = shopee_auth.load_tokens()
-    if tokens is None:
-        raise RuntimeError(
-            "No saved tokens found. Authorize Shopee via Connect Shopee first."
-        )
+    # Resolve ONE token record; access_token and shop_id come from it together.
+    tokens = shopee_auth.get_valid_tokens(shop_id)
+    access_token = tokens.get("access_token", "")
     shop_id = int(tokens.get("shop_id", 0))
     if not shop_id:
         raise RuntimeError(
@@ -367,6 +370,7 @@ def get_order_list(
     page_size: int = ORDER_LIST_PAGE_SIZE,
     cursor: str = "",
     response_optional_fields: Optional[List[str]] = None,
+    shop_id: Optional[int] = None,
 ) -> Dict:
     """Retrieve one page of orders from Shopee.
 
@@ -389,6 +393,7 @@ def get_order_list(
         response_optional_fields: Additional fields to include in each order
                      in the list response. If None, only order_sn is returned.
                      Example: ["order_status", "create_time", "update_time"]
+        shop_id:     Optional. Which connected shop — see _shopee_get().
 
     Returns:
         Dict with keys:
@@ -425,7 +430,7 @@ def get_order_list(
         order_status or "ALL", cursor or "(first page)", params["page_size"],
     )
 
-    response = _shopee_get(ORDER_LIST_PATH, params)
+    response = _shopee_get(ORDER_LIST_PATH, params, shop_id=shop_id)
 
     order_list  = response.get("order_list", [])
     next_cursor = response.get("next_cursor", "")
@@ -449,6 +454,7 @@ def get_all_orders(
     time_range_field: str = "create_time",
     order_status: Optional[str] = None,
     response_optional_fields: Optional[List[str]] = None,
+    shop_id: Optional[int] = None,
 ) -> List[Dict]:
     """Retrieve ALL orders across all pages for a given time range.
 
@@ -462,6 +468,7 @@ def get_all_orders(
         time_range_field: "create_time" (default) or "update_time".
         order_status: Optional status filter. See get_order_list() for values.
         response_optional_fields: Optional list of extra fields per order.
+        shop_id: Optional. Which connected shop — see _shopee_get().
 
     Returns:
         Flat list of all order dicts across all pages.
@@ -486,6 +493,7 @@ def get_all_orders(
             page_size=ORDER_LIST_PAGE_SIZE,
             cursor=cursor,
             response_optional_fields=response_optional_fields,
+            shop_id=shop_id,
         )
 
         all_orders.extend(result["order_list"])
@@ -519,6 +527,7 @@ def get_all_orders(
 def get_order_detail(
     order_sn_list: List[str],
     response_optional_fields: Optional[List[str]] = None,
+    shop_id: Optional[int] = None,
 ) -> List[Dict]:
     """Retrieve full order details for a list of order_sn values.
 
@@ -534,6 +543,7 @@ def get_order_detail(
                            buyer_user_id, buyer_username, estimated_shipping_fee,
                            recipient_address, actual_shipping_fee, item_list.
                        Pass an empty list [] to get only the default base fields.
+        shop_id:       Optional. Which connected shop — see _shopee_get().
 
     Returns:
         Flat list of order detail dicts, one per order.
@@ -568,7 +578,7 @@ def get_order_detail(
         if fields:
             params["response_optional_fields"] = ",".join(fields)
 
-        response = _shopee_get(ORDER_DETAIL_PATH, params)
+        response = _shopee_get(ORDER_DETAIL_PATH, params, shop_id=shop_id)
 
         order_list = response.get("order_list", [])
 
@@ -592,7 +602,11 @@ def get_order_detail(
 # Logistics: tracking number
 # ---------------------------------------------------------------------------
 
-def get_tracking_number(order_sn: str, package_number: Optional[str] = None) -> Dict:
+def get_tracking_number(
+    order_sn: str,
+    package_number: Optional[str] = None,
+    shop_id: Optional[int] = None,
+) -> Dict:
     """Retrieve the actual carrier tracking number (AWB) for an order via
     GET /api/v2/logistics/get_tracking_number.
 
@@ -605,6 +619,7 @@ def get_tracking_number(order_sn: str, package_number: Optional[str] = None) -> 
         order_sn:       Shopee order serial number. Required.
         package_number: Required by Shopee when the order has more than one
                          package; optional otherwise. Only sent if non-empty.
+        shop_id:         Optional. Which connected shop — see _shopee_get().
 
     Returns:
         The "response" sub-dict from Shopee's JSON body, unwrapped by
@@ -622,14 +637,14 @@ def get_tracking_number(order_sn: str, package_number: Optional[str] = None) -> 
         order_sn, package_number or "(not provided)",
     )
 
-    return _shopee_get(LOGISTICS_TRACKING_NUMBER_PATH, params)
+    return _shopee_get(LOGISTICS_TRACKING_NUMBER_PATH, params, shop_id=shop_id)
 
 
 # ---------------------------------------------------------------------------
 # Shop info
 # ---------------------------------------------------------------------------
 
-def get_shop_info() -> Dict:
+def get_shop_info(shop_id: Optional[int] = None) -> Dict:
     """Retrieve the connected shop's own info (including its real shop
     name) via GET /api/v2/shop/get_shop_info.
 
@@ -644,6 +659,9 @@ def get_shop_info() -> Dict:
     _shopee_get(..., unwrap_response=False) and returns the full top-level
     dict instead of the usual data["response"].
 
+    Args:
+        shop_id: Optional. Which connected shop — see _shopee_get().
+
     Returns:
         The full top-level dict from Shopee's JSON body (error, message,
         request_id, response, and shop_name all at this level). Expected
@@ -653,10 +671,10 @@ def get_shop_info() -> Dict:
         RuntimeError, ValueError, requests.* — see _shopee_get().
     """
     logger.info("get_shop_info: fetching connected shop info")
-    return _shopee_get(SHOP_INFO_PATH, {}, unwrap_response=False)
+    return _shopee_get(SHOP_INFO_PATH, {}, unwrap_response=False, shop_id=shop_id)
 
 
-def get_channel_list() -> Dict:
+def get_channel_list(shop_id: Optional[int] = None) -> Dict:
     """Retrieve the shop's enabled logistics channels via GET
     /api/v2/logistics/get_channel_list.
 
@@ -667,6 +685,9 @@ def get_channel_list() -> Dict:
 
     No parameters beyond the standard auth ones _shopee_get() already
     attaches.
+
+    Args:
+        shop_id: Optional. Which connected shop — see _shopee_get().
 
     Returns:
         The "response" sub-dict from Shopee's JSON body, unwrapped by
@@ -679,7 +700,7 @@ def get_channel_list() -> Dict:
         RuntimeError, ValueError, requests.* — see _shopee_get().
     """
     logger.info("get_channel_list: fetching shop logistics channels")
-    return _shopee_get(LOGISTICS_CHANNEL_LIST_PATH, {})
+    return _shopee_get(LOGISTICS_CHANNEL_LIST_PATH, {}, shop_id=shop_id)
 
 
 # ---------------------------------------------------------------------------
@@ -692,6 +713,7 @@ def get_orders_with_detail(
     time_range_field: str = "create_time",
     order_status: Optional[str] = None,
     detail_optional_fields: Optional[List[str]] = None,
+    shop_id: Optional[int] = None,
 ) -> List[Dict]:
     """Retrieve all orders AND their full detail for a given time range.
 
@@ -706,6 +728,7 @@ def get_orders_with_detail(
         order_status: Optional status filter.
         detail_optional_fields: Optional fields for get_order_detail().
                      Defaults to DEFAULT_OPTIONAL_FIELDS if None.
+        shop_id:     Optional. Which connected shop — see _shopee_get().
 
     Returns:
         List of full order detail dicts. Empty list if no orders found.
@@ -724,6 +747,7 @@ def get_orders_with_detail(
         time_to=time_to,
         time_range_field=time_range_field,
         order_status=order_status,
+        shop_id=shop_id,
     )
 
     if not orders:
@@ -738,4 +762,5 @@ def get_orders_with_detail(
     return get_order_detail(
         order_sn_list=order_sn_list,
         response_optional_fields=detail_optional_fields,
+        shop_id=shop_id,
     )
