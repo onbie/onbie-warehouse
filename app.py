@@ -18,6 +18,19 @@ SNAPSHOT_COLUMNS = [
     "Antar ke counter/ pick-up", "Ekspedisi", "Nama Variasi", "Jumlah",
 ]
 
+# ---- Business timestamps: explicit Asia/Jakarta (WIB) ----
+# Streamlit Cloud runs in UTC, so a naive datetime.now() is 7 hours behind
+# Jakarta time: packed_at would be stamped in UTC and the Daily Report's
+# "today" would roll over at 07:00 WIB instead of midnight. Every business
+# timestamp (packed_at, "today" in the Daily Report / Packing History, and
+# the print stamps) comes from _now_wib(). Stored/printed format unchanged.
+WIB = ZoneInfo("Asia/Jakarta")
+
+
+def _now_wib():
+    return datetime.now(WIB)
+
+
 # ---- Shopee OAuth callback handler ----
 # Runs once per page load. If Shopee redirected back here with ?code=&shop_id=,
 # exchange the code for tokens immediately before rendering the packing UI.
@@ -145,9 +158,10 @@ _handle_shopee_oauth()
 
 def adapt_shopee_api_to_df(orders_with_detail, shop_name="", channel_service_types=None):
     """Convert get_orders_with_detail() output into a DataFrame matching
-    the column shape the existing packing UI expects (same as orders_master.csv).
+    the column shape the existing packing UI expects (same columns as
+    load_shopee_orders() / SHOPEE_DATA_FILE).
 
-    One row per product item — mirrors the EasyBoss multi-row structure.
+    One row per product item (1 variant = 1 row).
     Only confirmed-working Shopee API fields are mapped. recipient_address
     and buyer_username are confirmed and mapped below. note and
     package_list (tracking_number, fulfillment method) were added next and
@@ -353,7 +367,7 @@ def _sync_shopee_orders_now():
     order_sn (keep first occurrence), and refresh the packing queue —
     identical behavior to the original manual sync. Updates
     st.session_state["shopee_orders_df"], writes SHOPEE_DATA_FILE, clears
-    the orders_master.csv cache, and records the sync timestamp/outcome in
+    the st.cache_data caches, and records the sync timestamp/outcome in
     st.session_state so the sidebar can display it.
 
     Returns (success: bool, message: str).
@@ -477,8 +491,9 @@ with st.sidebar:
                 "shop_id":       _tokens.get("shop_id"),
             })
 
-        # Shopee rotates refresh_token on each refresh. tokens.json always
-        # has the current one, but Streamlit secrets can only be updated
+        # Shopee rotates refresh_token on each refresh. The stored tokens
+        # (Supabase, or tokens.json when Supabase isn't configured) always
+        # have the current one, but Streamlit secrets can only be updated
         # manually (an app can't write to its own Secrets at runtime), so
         # flag it here when they've drifted apart — otherwise the NEXT
         # container restart would bootstrap from the now-stale secret value
@@ -502,65 +517,6 @@ with st.sidebar:
                 st.link_button("🔄 Klik di sini untuk reconnect ke Shopee", _auth_url)
             except ValueError as e:
                 st.error(f"❌ {e}")
-
-        # ----------------------------------------------------------------
-        # TEMPORARY SHOPEE INTEGRATION TEST
-        # Proves real Shopee order data can flow from shopee_api into app.py.
-        # Stored in st.session_state only — no CSV/database writes.
-        # Remove this entire block when integration is promoted to production.
-        # ----------------------------------------------------------------
-        st.divider()
-        st.caption("🧪 Shopee Integration Test")
-
-        if st.button("🧪 Load Shopee Orders", key="btn_load_shopee_orders"):
-            import shopee_api as _shopee_api
-            import time as _time
-
-            _time_to   = int(_time.time())
-            _time_from = _time_to - 86400  # last 24 hours
-
-            with st.spinner("Fetching orders from Shopee..."):
-                try:
-                    _orders = _shopee_api.get_orders_with_detail(
-                        time_from=_time_from,
-                        time_to=_time_to,
-                        time_range_field="create_time",
-                        detail_optional_fields=["item_list"],
-                    )
-                    st.session_state["_shopee_orders_test"] = _orders
-                except ValueError as _e:
-                    st.error(f"❌ Parameter error: {_e}")
-                    st.session_state.pop("_shopee_orders_test", None)
-                except RuntimeError as _e:
-                    st.error(f"❌ Shopee API error: {_e}")
-                    st.session_state.pop("_shopee_orders_test", None)
-                except Exception as _e:
-                    st.error(f"❌ Unexpected error: {_e}")
-                    st.session_state.pop("_shopee_orders_test", None)
-
-        # Display results if available in session state
-        if "_shopee_orders_test" in st.session_state:
-            _orders = st.session_state["_shopee_orders_test"]
-            st.success(f"✅ {len(_orders)} order fetched dari Shopee (24 jam terakhir)")
-
-            for _o in _orders:
-                _sn     = _o.get("order_sn", "-")
-                _status = _o.get("order_status", "-")
-                _items  = _o.get("item_list", []) or []
-
-                with st.expander(f"📦 {_sn}  —  {_status}"):
-                    if not _items:
-                        st.caption("(no item_list returned)")
-                    for _item in _items:
-                        st.json({
-                            "item_name":  _item.get("item_name", "-"),
-                            "model_name": _item.get("model_name", "-"),
-                            "model_sku":  _item.get("model_sku", "-"),
-                            "qty":        _item.get("model_quantity_purchased", "-"),
-                        })
-        # ----------------------------------------------------------------
-        # END TEMPORARY SHOPEE INTEGRATION TEST
-        # ----------------------------------------------------------------
 
         # ----------------------------------------------------------------
         # Phase 1 — Shopee direct packing queue sync
@@ -591,10 +547,6 @@ with st.sidebar:
 
         # ----------------------------------------------------------------
         # END Phase 1
-        # ----------------------------------------------------------------
-
-        # ----------------------------------------------------------------
-        # END TEMPORARY
         # ----------------------------------------------------------------
 
     else:
@@ -724,7 +676,7 @@ def load_snapshots_df():
 def save_packed_snapshot(order_number, order_rows, packed_at):
     """Save a permanent snapshot of this order's product rows at pack time,
     so the Daily Packing Report keeps working even after orders_df has since
-    moved on (new EasyBoss import, Shopee sync, etc.). One row is saved per
+    moved on (a later Shopee sync, etc.). One row is saved per
     product row so multi-item orders are preserved. Never deletes old
     snapshots (no retention/pruning) and never duplicates an order that
     already has a snapshot."""
@@ -756,7 +708,7 @@ def save_packed_snapshot(order_number, order_rows, packed_at):
 def save_packed_order(order_number, order_rows=None):
     df = load_packed_df()
     order_number = str(order_number).strip()
-    packed_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    packed_at = _now_wib().strftime("%Y-%m-%d %H:%M:%S")
     if order_number not in set(df["order_number"]):
         new_row = pd.DataFrame([{
             "order_number": order_number,
@@ -873,7 +825,6 @@ if "not_found_query" not in st.session_state:
 
 # Use Shopee-synced DataFrame when available (fast path, same session).
 # On reload, fall back to the last persisted shopee_orders.csv sync.
-# EasyBoss/orders_master.csv is no longer used as the primary fallback.
 if "shopee_orders_df" in st.session_state:
     orders_df = st.session_state["shopee_orders_df"]
 else:
@@ -1090,7 +1041,7 @@ else:
                             <tr><th>No. Pesanan</th><th>Username</th><th>Nama Penerima</th><th>Platform</th><th>Toko</th><th>Kota/Kabupaten</th><th>Nama Logistik</th><th>Ekspedisi</th><th>Variasi</th><th>Qty</th></tr>
                             {product_rows_html}
                         </table>
-                        <p style="margin-top:24px;font-size:12px;color:#888;">Dicetak: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</p>
+                        <p style="margin-top:24px;font-size:12px;color:#888;">Dicetak: {_now_wib().strftime('%Y-%m-%d %H:%M:%S')}</p>
                     </body>
                     </html>
                     """
@@ -1216,7 +1167,7 @@ else:
     st.write("### 📅 Laporan Packing Hari Ini")
 
     packed_df = load_packed_df()
-    today_str = datetime.now().strftime("%Y-%m-%d")
+    today_str = _now_wib().strftime("%Y-%m-%d")
     today_packed_df = packed_df[packed_df["packed_at"].astype(str).str.startswith(today_str)]
 
     if today_packed_df.empty:
@@ -1325,7 +1276,7 @@ else:
                 </tr>
                 {report_table_rows}
             </table>
-            <p style="margin-top:24px;font-size:12px;color:#888;">Dicetak: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</p>
+            <p style="margin-top:24px;font-size:12px;color:#888;">Dicetak: {_now_wib().strftime('%Y-%m-%d %H:%M:%S')}</p>
         </body>
         </html>
         """
@@ -1360,7 +1311,7 @@ else:
         st.info("Belum ada data history packing dengan timestamp.")
     else:
         # Calculate summary stats
-        today = pd.Timestamp(datetime.now().date())
+        today = pd.Timestamp(_now_wib().date())
         seven_days_ago = today - pd.Timedelta(days=7)
 
         total_packed = len(packed_df_valid)
