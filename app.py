@@ -18,7 +18,7 @@ SHOPEE_ONBIE_SHOP_ID = 1272241861
 # only shops listed here are synced into the packing queue. Onbie only for now.
 # Every token/API call passes an explicit shop_id taken from this registry —
 # there is no "latest token" / shop_id=None path.
-SHOPEE_SHOPS = {"Onbie": SHOPEE_ONBIE_SHOP_ID}
+SHOPEE_SHOPS = {"Onbie": SHOPEE_ONBIE_SHOP_ID, "Gotto": 1179306776}
 SNAPSHOT_FILE = "packed_snapshots.csv"
 SNAPSHOT_COLUMNS = [
     "order_number", "packed_at", "No. Pesanan", "Username (Pembeli)",
