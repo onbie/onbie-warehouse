@@ -1141,6 +1141,31 @@ else:
                 else:
                     big_banner([f"STATUS: {order_status}", "Status bukan 'Perlu Dikirim' — tidak bisa di-pack"], "#757575")
 
+                # Always-visible shop label — which shop (Onbie / Gotto) this
+                # order belongs to, sourced from the order's own "Toko" value
+                # (same field already shown inside "Detail Order" below), so
+                # the operator doesn't have to open that expander on every
+                # scan just to tell the two shops apart. Display-only.
+                _order_shop = results.iloc[0].get("Toko", "-")
+                st.markdown(
+                    f"""
+                    <div style="
+                        display: inline-block;
+                        background-color: #1a1a1a;
+                        color: white;
+                        font-size: 15px;
+                        font-weight: 700;
+                        letter-spacing: 0.5px;
+                        padding: 6px 16px;
+                        border-radius: 999px;
+                        margin-bottom: 12px;
+                    ">
+                        🏬 {_order_shop}
+                    </div>
+                    """,
+                    unsafe_allow_html=True,
+                )
+
                 with st.container(border=True):
                     st.write(f"### 📦 Produk dalam order ini ({len(results)} item)")
 
