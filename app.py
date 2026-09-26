@@ -21,7 +21,7 @@ SHOPEE_ONBIE_SHOP_ID = 1272241861
 SHOPEE_SHOPS = {"Onbie": SHOPEE_ONBIE_SHOP_ID, "Gotto": 1179306776}
 SNAPSHOT_FILE = "packed_snapshots.csv"
 SNAPSHOT_COLUMNS = [
-    "order_number", "packed_at", "No. Pesanan", "Username (Pembeli)",
+    "order_number", "shop_id", "packed_at", "No. Pesanan", "Username (Pembeli)",
     "Nama Penerima", "Platform", "Toko", "Provinsi", "Kota/Kabupaten",
     "Antar ke counter/ pick-up", "Ekspedisi", "Nama Variasi", "Jumlah",
 ]
@@ -857,17 +857,32 @@ def load_packed_df():
         df["order_number"] = df["order_number"].astype(str).str.strip()
         if "packed_at" not in df.columns:
             df["packed_at"] = ""  # old-format file, no timestamp known
+        if "shop_id" not in df.columns:
+            # Legacy rows predate multi-shop support — they were all Onbie's.
+            df["shop_id"] = SHOPEE_ONBIE_SHOP_ID
+        df["shop_id"] = (
+            pd.to_numeric(df["shop_id"], errors="coerce")
+            .fillna(SHOPEE_ONBIE_SHOP_ID)
+            .astype("int64")
+        )
         return df
-    return pd.DataFrame(columns=["order_number", "packed_at"])
+    return pd.DataFrame(columns=["order_number", "packed_at", "shop_id"])
 
 
 def load_packed_orders():
-    return set(load_packed_df()["order_number"])
-
-
-def get_packed_at(order_number):
+    """Set of (shop_id, order_number) tuples identifying every packed order.
+    shop_id + order_number together are the packed identity — order_number
+    alone is NOT unique once more than one shop is connected."""
     df = load_packed_df()
-    match = df[df["order_number"] == str(order_number).strip()]
+    return set(zip(df["shop_id"], df["order_number"]))
+
+
+def get_packed_at(shop_id, order_number):
+    df = load_packed_df()
+    match = df[
+        (df["shop_id"] == int(shop_id))
+        & (df["order_number"] == str(order_number).strip())
+    ]
     if not match.empty:
         val = match.iloc[0]["packed_at"]
         return val if str(val).strip() else None
@@ -879,24 +894,39 @@ def load_snapshots_df():
     if os.path.exists(SNAPSHOT_FILE):
         df = pd.read_csv(SNAPSHOT_FILE)
         df["order_number"] = df["order_number"].astype(str).str.strip()
+        if "shop_id" not in df.columns:
+            # Legacy rows predate multi-shop support — they were all Onbie's.
+            df["shop_id"] = SHOPEE_ONBIE_SHOP_ID
+        df["shop_id"] = (
+            pd.to_numeric(df["shop_id"], errors="coerce")
+            .fillna(SHOPEE_ONBIE_SHOP_ID)
+            .astype("int64")
+        )
         return df
     return pd.DataFrame(columns=SNAPSHOT_COLUMNS)
 
 
-def save_packed_snapshot(order_number, order_rows, packed_at):
+def save_packed_snapshot(shop_id, order_number, order_rows, packed_at):
     """Save a permanent snapshot of this order's product rows at pack time,
     so the Daily Packing Report keeps working even after orders_df has since
     moved on (a later Shopee sync, etc.). One row is saved per
     product row so multi-item orders are preserved. Never deletes old
     snapshots (no retention/pruning) and never duplicates an order that
-    already has a snapshot."""
+    already has a snapshot. Keyed by (shop_id, order_number) — order_number
+    alone can repeat across shops."""
     if order_rows is None or order_rows.empty:
         return
+    shop_id = int(shop_id)
+    order_number = str(order_number).strip()
     existing = load_snapshots_df()
-    if order_number in set(existing["order_number"]):
+    already_snapshotted = (
+        (existing["shop_id"] == shop_id) & (existing["order_number"] == order_number)
+    ).any()
+    if already_snapshotted:
         return  # already snapshotted, don't duplicate
     new_rows = pd.DataFrame({
         "order_number": order_number,
+        "shop_id": shop_id,
         "packed_at": packed_at,
         "No. Pesanan": order_rows.get("No. Pesanan", "-"),
         "Username (Pembeli)": order_rows.get("Username (Pembeli)", "-"),
@@ -915,19 +945,22 @@ def save_packed_snapshot(order_number, order_rows, packed_at):
     load_snapshots_df.clear()  # invalidate cache: file just changed on disk
 
 
-def save_packed_order(order_number, order_rows=None):
+def save_packed_order(shop_id, order_number, order_rows=None):
     df = load_packed_df()
+    shop_id = int(shop_id)
     order_number = str(order_number).strip()
     packed_at = _now_wib().strftime("%Y-%m-%d %H:%M:%S")
-    if order_number not in set(df["order_number"]):
+    already_packed = ((df["shop_id"] == shop_id) & (df["order_number"] == order_number)).any()
+    if not already_packed:
         new_row = pd.DataFrame([{
             "order_number": order_number,
             "packed_at": packed_at,
+            "shop_id": shop_id,
         }])
         df = pd.concat([df, new_row], ignore_index=True)
     df.to_csv(PACKED_FILE, index=False)
     load_packed_df.clear()  # invalidate cache: file just changed on disk
-    save_packed_snapshot(order_number, order_rows, packed_at)
+    save_packed_snapshot(shop_id, order_number, order_rows, packed_at)
 
 
 def style_dashboard_table(df, wrap_columns=None):
@@ -1031,6 +1064,10 @@ if "just_packed_order" not in st.session_state:
     st.session_state.just_packed_order = None
 if "not_found_query" not in st.session_state:
     st.session_state.not_found_query = None
+if "ambiguous_shops" not in st.session_state:
+    # List of Toko labels when a scanned query matches the same order number
+    # under more than one shop — set only in that case, otherwise None.
+    st.session_state.ambiguous_shops = None
 
 
 # Use Shopee-synced DataFrame when available (fast path, same session).
@@ -1088,35 +1125,76 @@ else:
                     st.session_state.displayed_order = None
                     st.session_state.just_packed_order = None
                     st.session_state.not_found_query = q
+                    st.session_state.ambiguous_shops = None
                 else:
-                    order_number = str(results.iloc[0]["No. Pesanan"]).strip()
-                    st.session_state.displayed_order = order_number
-                    st.session_state.just_packed_order = None
-                    st.session_state.not_found_query = None
+                    # Resolve by (Shop ID, No. Pesanan) — the same order number
+                    # can legitimately exist under more than one shop. If this
+                    # query matches more than one distinct (shop, order), never
+                    # guess which one via results.iloc[0]: that could silently
+                    # select the wrong shop's order. Multiple rows for the SAME
+                    # (shop, order) — a multi-variant order — is not ambiguity.
+                    _distinct_orders = results[["Shop ID", "No. Pesanan", "Toko"]].drop_duplicates(
+                        subset=["Shop ID", "No. Pesanan"]
+                    )
+                    if len(_distinct_orders) > 1:
+                        st.session_state.displayed_order = None
+                        st.session_state.just_packed_order = None
+                        st.session_state.not_found_query = None
+                        st.session_state.ambiguous_shops = sorted(
+                            set(str(t) for t in _distinct_orders["Toko"])
+                        )
+                    else:
+                        order_number = str(results.iloc[0]["No. Pesanan"]).strip()
+                        shop_id = int(results.iloc[0]["Shop ID"])
+                        st.session_state.displayed_order = (shop_id, order_number)
+                        st.session_state.just_packed_order = None
+                        st.session_state.not_found_query = None
+                        st.session_state.ambiguous_shops = None
             else:
                 # Blank Enter = confirm pack the order currently on screen
                 st.session_state.not_found_query = None
-                order_number = st.session_state.displayed_order
-                if order_number:
-                    mask = orders_df["No. Pesanan"].astype(str).str.strip() == order_number
+                st.session_state.ambiguous_shops = None
+                displayed = st.session_state.displayed_order
+                if displayed:
+                    shop_id, order_number = displayed
+                    mask = (
+                        (orders_df["Shop ID"].astype("int64") == shop_id)
+                        & (orders_df["No. Pesanan"].astype(str).str.strip() == order_number)
+                    )
                     results = orders_df[mask]
                     if not results.empty:
                         status = results.iloc[0].get('Status Pesanan', '-')
                         packable = is_packable_status(status)
-                        already_packed = order_number in packed_orders
+                        already_packed = (shop_id, order_number) in packed_orders
                         if packable and not already_packed:
-                            save_packed_order(order_number, results)
-                            st.session_state.just_packed_order = order_number
+                            save_packed_order(shop_id, order_number, results)
+                            st.session_state.just_packed_order = (shop_id, order_number)
                             st.rerun()  # full-app rerun: dashboard below must reflect the new pack
 
         # ---- Order not found banner ----
         if st.session_state.not_found_query:
             big_banner(["❌ ORDER TIDAK DITEMUKAN", "Cek nomor pesanan / nomor resi"], "#b71c1c")
 
+        # ---- Ambiguous match banner: same number exists in >1 shop ----
+        # Never auto-selected a shop here — operator must re-scan with a
+        # value that's unique (No. Resi / tracking number).
+        if st.session_state.ambiguous_shops:
+            big_banner(
+                [
+                    "⚠️ NOMOR DITEMUKAN DI LEBIH DARI 1 TOKO",
+                    "Toko: " + ", ".join(st.session_state.ambiguous_shops),
+                    "Scan No. Resi (nomor resi unik per order) untuk memilih order yang benar",
+                ],
+                "#e65100",
+            )
+
         # ---- Render currently displayed order (persists across reruns) ----
         if st.session_state.displayed_order:
-            order_number = st.session_state.displayed_order
-            mask = orders_df["No. Pesanan"].astype(str).str.strip() == order_number
+            shop_id, order_number = st.session_state.displayed_order
+            mask = (
+                (orders_df["Shop ID"].astype("int64") == shop_id)
+                & (orders_df["No. Pesanan"].astype(str).str.strip() == order_number)
+            )
             results = orders_df[mask]
 
             if results.empty:
@@ -1126,12 +1204,12 @@ else:
                 cancelled = is_cancelled_status(order_status)
                 packable = is_packable_status(order_status)
                 packed_orders = load_packed_orders()  # refresh after possible packing above
-                is_packed = order_number in packed_orders
-                packed_at = get_packed_at(order_number) if is_packed else None
+                is_packed = (shop_id, order_number) in packed_orders
+                packed_at = get_packed_at(shop_id, order_number) if is_packed else None
 
                 if cancelled:
                     big_banner(["❌ PESANAN BATAL", "Jangan packing order ini"], "#b71c1c")
-                elif st.session_state.just_packed_order == order_number:
+                elif st.session_state.just_packed_order == (shop_id, order_number):
                     big_banner(["✅ SUDAH DI-PACK", "Order ini berhasil dicatat"], "#2e7d32")
                 elif is_packed:
                     ts_text = f"Packed At: {packed_at}" if packed_at else "Packed At: tidak tercatat"
@@ -1220,8 +1298,8 @@ else:
                         st.button("✅ Sudah Di-Pack", disabled=True, key="btn_already_packed")
                     else:
                         if st.button("📌 Mark as Packed", key="btn_manual_pack", use_container_width=True):
-                            save_packed_order(order_number, results)
-                            st.session_state.just_packed_order = order_number
+                            save_packed_order(shop_id, order_number, results)
+                            st.session_state.just_packed_order = (shop_id, order_number)
                             st.rerun()
 
                     with st.expander("📋 Detail Order"):
@@ -1308,11 +1386,18 @@ else:
 
     # Use one row per unique order to avoid double-counting multi-product orders
     packed_orders = load_packed_orders()
-    unique_orders = orders_df.drop_duplicates(subset="No. Pesanan").copy()
+    # Dedup by (Shop ID, No. Pesanan) — order_number alone is NOT unique once
+    # more than one shop is connected, so dedup by order number alone would
+    # silently collapse two different shops' orders that share a number.
+    unique_orders = orders_df.drop_duplicates(subset=["Shop ID", "No. Pesanan"]).copy()
     unique_orders["__cancelled"] = unique_orders["Status Pesanan"].apply(is_cancelled_status)
     unique_orders["__packable"] = unique_orders["Status Pesanan"].apply(is_packable_status)
+    unique_orders["__shop_id"] = pd.to_numeric(unique_orders["Shop ID"], errors="coerce").fillna(SHOPEE_ONBIE_SHOP_ID).astype("int64")
     unique_orders["__order_no_str"] = unique_orders["No. Pesanan"].astype(str).str.strip()
-    unique_orders["__packed"] = unique_orders["__order_no_str"].isin(packed_orders)
+    unique_orders["__packed"] = pd.Series(
+        list(zip(unique_orders["__shop_id"], unique_orders["__order_no_str"])),
+        index=unique_orders.index,
+    ).isin(packed_orders)
 
     total_orders = len(unique_orders)
     total_cancelled = int(unique_orders["__cancelled"].sum())
@@ -1353,8 +1438,12 @@ else:
     belum_source = orders_df.copy()
     belum_source["__cancelled"] = belum_source["Status Pesanan"].apply(is_cancelled_status)
     belum_source["__packable"] = belum_source["Status Pesanan"].apply(is_packable_status)
+    belum_source["__shop_id"] = pd.to_numeric(belum_source["Shop ID"], errors="coerce").fillna(SHOPEE_ONBIE_SHOP_ID).astype("int64")
     belum_source["__order_no_str"] = belum_source["No. Pesanan"].astype(str).str.strip()
-    belum_source["__packed"] = belum_source["__order_no_str"].isin(packed_orders)
+    belum_source["__packed"] = pd.Series(
+        list(zip(belum_source["__shop_id"], belum_source["__order_no_str"])),
+        index=belum_source.index,
+    ).isin(packed_orders)
 
     belum_df = belum_source[belum_source["__packable"] & ~belum_source["__packed"]].copy()
 
@@ -1408,26 +1497,32 @@ else:
     if today_packed_df.empty:
         st.info("Belum ada order yang di-pack hari ini.")
     else:
-        today_order_numbers = set(today_packed_df["order_number"])
+        # (shop_id, order_number) — order_number alone is NOT unique once
+        # more than one shop is connected.
+        today_orders = set(zip(today_packed_df["shop_id"], today_packed_df["order_number"]))
 
         # Read product/buyer details from the pack-time snapshot first, so
         # this report stays correct even if orders_df has since moved on
         # (new import / Shopee sync). Orders packed before a snapshot
         # exists for them fall back to the live orders_df lookup.
-        snapshots_df = load_snapshots_df()
-        snapshot_rows = snapshots_df[snapshots_df["order_number"].isin(today_order_numbers)]
-        snapshotted_order_numbers = set(snapshot_rows["order_number"])
-        missing_order_numbers = today_order_numbers - snapshotted_order_numbers
+        snapshots_df = load_snapshots_df().copy()
+        snapshots_df["__key"] = list(zip(snapshots_df["shop_id"], snapshots_df["order_number"]))
+        snapshot_rows = snapshots_df[snapshots_df["__key"].isin(today_orders)]
+        snapshotted_orders = set(snapshot_rows["__key"])
+        missing_orders = today_orders - snapshotted_orders
 
-        report_rows = snapshot_rows.drop(columns=["order_number", "packed_at"])
+        report_rows = snapshot_rows.drop(columns=["order_number", "shop_id", "packed_at", "__key"])
 
-        if missing_order_numbers:
-            fallback_rows = orders_df[
-                orders_df["No. Pesanan"].astype(str).str.strip().isin(missing_order_numbers)
-            ]
+        if missing_orders:
+            orders_df_keyed = orders_df.copy()
+            orders_df_keyed["__key"] = list(zip(
+                pd.to_numeric(orders_df_keyed["Shop ID"], errors="coerce").fillna(SHOPEE_ONBIE_SHOP_ID).astype("int64"),
+                orders_df_keyed["No. Pesanan"].astype(str).str.strip(),
+            ))
+            fallback_rows = orders_df_keyed[orders_df_keyed["__key"].isin(missing_orders)].drop(columns="__key")
             report_rows = pd.concat([report_rows, fallback_rows], ignore_index=True)
 
-        st.write(f"**{len(today_order_numbers)} order** sudah di-pack hari ini ({today_str})")
+        st.write(f"**{len(today_orders)} order** sudah di-pack hari ini ({today_str})")
 
         report_df = report_rows[
             ["No. Pesanan", "Username (Pembeli)", "Nama Penerima", "Platform", "Toko", "Kota/Kabupaten", "Antar ke counter/ pick-up", "Ekspedisi", "Nama Variasi", "Jumlah"]
@@ -1504,7 +1599,7 @@ else:
                 Perlu Dikirim: {packable_orders} &nbsp;|&nbsp;
                 Batal: {total_cancelled}
             </p>
-            <p class="summary"><b>Di-pack hari ini: {len(today_order_numbers)} order</b></p>
+            <p class="summary"><b>Di-pack hari ini: {len(today_orders)} order</b></p>
             <table>
                 <tr>
                     <th>No. Pesanan</th><th>Username</th><th>Nama Penerima</th><th>Platform</th><th>Toko</th><th>Kabupaten/Kota</th><th>Nama Logistik</th><th>Ekspedisi</th><th>Variasi</th><th>Qty</th><th>Keterangan</th>
