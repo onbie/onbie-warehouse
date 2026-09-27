@@ -1654,9 +1654,10 @@ else:
         m2.metric("Packed Today", today_packed)
         m3.metric("Packed Last 7 Days", last_7_days)
 
-        # Daily breakdown — grouped by date, each date expandable to a native
-        # st.dataframe of that day's packed orders (1 variant = 1 row,
-        # preserved exactly as packed — never aggregated). Product/buyer
+        # Daily breakdown — grouped by date via a selectbox; the selected
+        # date shows a native st.dataframe of that day's packed orders
+        # (1 variant = 1 row, preserved exactly as packed — never
+        # aggregated). Product/buyer
         # detail is read from the pack-time snapshot (packed_snapshots.csv),
         # the same historical source of truth the Daily Report uses, so this
         # keeps working for any past date regardless of what's in the live
@@ -1673,50 +1674,56 @@ else:
         _history_snapshots["__key"] = list(zip(_history_snapshots["shop_id"], _history_snapshots["order_number"]))
         _shop_id_to_label = {v: k for k, v in SHOPEE_SHOPS.items()}
 
-        for _hist_date in daily_counts["Date"]:
-            _day_group = packed_df_valid[packed_df_valid["packed_at"].dt.date == _hist_date].sort_values("packed_at")
-            with st.expander(f"{_hist_date} — {len(_day_group)} order"):
-                _hist_rows = []
-                for _, _packed_row in _day_group.iterrows():
-                    _h_shop_id = int(_packed_row["shop_id"])
-                    _h_order_no = str(_packed_row["order_number"])
-                    _h_packed_at = _packed_row["packed_at"]
-                    _h_packed_at_str = _h_packed_at.strftime("%Y-%m-%d %H:%M:%S") if pd.notna(_h_packed_at) else "-"
+        _hist_date_options = list(daily_counts["Date"])  # already sorted newest first
+        _selected_hist_date = st.selectbox(
+            "Pilih tanggal",
+            options=_hist_date_options,
+            format_func=lambda d: f"{d} — {int(daily_counts.loc[daily_counts['Date'] == d, 'Packed Count'].iloc[0])} order",
+            key="packing_history_date_select",
+        )
 
-                    _snap_rows = _history_snapshots[_history_snapshots["__key"] == (_h_shop_id, _h_order_no)]
+        _day_group = packed_df_valid[packed_df_valid["packed_at"].dt.date == _selected_hist_date].sort_values("packed_at")
+        _hist_rows = []
+        for _, _packed_row in _day_group.iterrows():
+            _h_shop_id = int(_packed_row["shop_id"])
+            _h_order_no = str(_packed_row["order_number"])
+            _h_packed_at = _packed_row["packed_at"]
+            _h_packed_at_str = _h_packed_at.strftime("%Y-%m-%d %H:%M:%S") if pd.notna(_h_packed_at) else "-"
 
-                    if not _snap_rows.empty:
-                        for _, _sr in _snap_rows.iterrows():
-                            _qty = _sr.get("Jumlah")
-                            _hist_rows.append({
-                                "Packed At": _h_packed_at_str,
-                                "Order Number": _h_order_no,
-                                "Shop": _safe_cell(_sr.get("Toko")),
-                                "Username": _safe_cell(_sr.get("Username (Pembeli)")),
-                                "Variant": _safe_cell(_sr.get("Nama Variasi")),
-                                "Qty": int(_qty) if pd.notna(_qty) else 0,
-                            })
-                    else:
-                        # No snapshot for this packed order (predates the
-                        # snapshot feature) — show identity only.
-                        _hist_rows.append({
-                            "Packed At": _h_packed_at_str,
-                            "Order Number": _h_order_no,
-                            "Shop": _shop_id_to_label.get(_h_shop_id, str(_h_shop_id)),
-                            "Username": "-",
-                            "Variant": "-",
-                            "Qty": 0,
-                        })
+            _snap_rows = _history_snapshots[_history_snapshots["__key"] == (_h_shop_id, _h_order_no)]
 
-                _hist_display_df = pd.DataFrame(
-                    _hist_rows,
-                    columns=["Packed At", "Order Number", "Shop", "Username", "Variant", "Qty"],
-                )
-                st.dataframe(
-                    _hist_display_df,
-                    use_container_width=True,
-                    hide_index=True,
-                )
+            if not _snap_rows.empty:
+                for _, _sr in _snap_rows.iterrows():
+                    _qty = _sr.get("Jumlah")
+                    _hist_rows.append({
+                        "Packed At": _h_packed_at_str,
+                        "Order Number": _h_order_no,
+                        "Shop": _safe_cell(_sr.get("Toko")),
+                        "Username": _safe_cell(_sr.get("Username (Pembeli)")),
+                        "Variant": _safe_cell(_sr.get("Nama Variasi")),
+                        "Qty": int(_qty) if pd.notna(_qty) else 0,
+                    })
+            else:
+                # No snapshot for this packed order (predates the
+                # snapshot feature) — show identity only.
+                _hist_rows.append({
+                    "Packed At": _h_packed_at_str,
+                    "Order Number": _h_order_no,
+                    "Shop": _shop_id_to_label.get(_h_shop_id, str(_h_shop_id)),
+                    "Username": "-",
+                    "Variant": "-",
+                    "Qty": 0,
+                })
+
+        _hist_display_df = pd.DataFrame(
+            _hist_rows,
+            columns=["Packed At", "Order Number", "Shop", "Username", "Variant", "Qty"],
+        )
+        st.dataframe(
+            _hist_display_df,
+            use_container_width=True,
+            hide_index=True,
+        )
 
         # Line chart (sorted by date ascending for better visualization)
         chart_data = daily_counts.sort_values("Date").copy()
