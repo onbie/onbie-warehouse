@@ -21,3 +21,4 @@ data/shopee_orders.xlsx
 tokens.json
 .DS_Store
 *.xlsx
+tiktok_tokens.json
