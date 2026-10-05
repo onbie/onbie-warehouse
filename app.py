@@ -776,6 +776,50 @@ with st.sidebar:
 
     st.divider()
 
+    # ------------------------------------------------------------------
+    # TEMPORARY EXPORT BLOCK — remove after use.
+    # Gated by st.secrets["export_key"]; exports ONLY packed.csv and
+    # packed_snapshots.csv. Does not touch packing/search/sync/report logic.
+    # ------------------------------------------------------------------
+    with st.expander("🔒 Export Data"):
+        _export_key_input = st.text_input(
+            "Export key", type="password", key="_export_key_input"
+        )
+        try:
+            _export_key_expected = st.secrets["export_key"]
+        except (KeyError, FileNotFoundError):
+            _export_key_expected = None
+
+        if _export_key_expected and _export_key_input == _export_key_expected:
+            if os.path.exists(PACKED_FILE):
+                with open(PACKED_FILE, "rb") as _f:
+                    st.download_button(
+                        "⬇️ Download packed.csv",
+                        _f.read(),
+                        file_name="packed.csv",
+                        mime="text/csv",
+                        key="_export_packed_csv",
+                    )
+            else:
+                st.caption("packed.csv not found.")
+
+            if os.path.exists(SNAPSHOT_FILE):
+                with open(SNAPSHOT_FILE, "rb") as _f:
+                    st.download_button(
+                        "⬇️ Download packed_snapshots.csv",
+                        _f.read(),
+                        file_name="packed_snapshots.csv",
+                        mime="text/csv",
+                        key="_export_snapshots_csv",
+                    )
+            else:
+                st.caption("packed_snapshots.csv not found.")
+        elif _export_key_input:
+            st.error("❌ Invalid export key.")
+    # ------------------------------------------------------------------
+    # END TEMPORARY EXPORT BLOCK
+    # ------------------------------------------------------------------
+
 CANCELLED_KEYWORDS = ["batal", "cancel"]
 # Only orders whose status CONTAINS this phrase may be packed
 PACKABLE_KEYWORD = "perlu dikirim"
