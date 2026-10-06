@@ -776,6 +776,51 @@ with st.sidebar:
 
     st.divider()
 
+    # ==================================================================
+    # TEMPORARY PRODUCTION DATA EXPORT — REMOVE AFTER BACKUP
+    # Gated by st.secrets["export_key"]. Exposes raw, unmodified downloads
+    # of packed.csv and packed_snapshots.csv only, read from their current
+    # runtime paths. No other logic in this file is touched.
+    # ==================================================================
+    with st.expander("🔒 Temporary Production Data Export"):
+        _export_key_input = st.text_input(
+            "Export key", type="password", key="_export_key_input"
+        )
+        try:
+            _export_key_expected = st.secrets["export_key"]
+        except (KeyError, FileNotFoundError):
+            _export_key_expected = None
+
+        if _export_key_expected and _export_key_input == _export_key_expected:
+            if os.path.exists(PACKED_FILE):
+                with open(PACKED_FILE, "rb") as _f:
+                    st.download_button(
+                        "⬇️ Download packed.csv (raw)",
+                        _f.read(),
+                        file_name="packed.csv",
+                        mime="text/csv",
+                        key="_export_packed_csv",
+                    )
+            else:
+                st.warning(f"⚠️ File not found: {PACKED_FILE}")
+
+            if os.path.exists(SNAPSHOT_FILE):
+                with open(SNAPSHOT_FILE, "rb") as _f:
+                    st.download_button(
+                        "⬇️ Download packed_snapshots.csv (raw)",
+                        _f.read(),
+                        file_name="packed_snapshots.csv",
+                        mime="text/csv",
+                        key="_export_snapshots_csv",
+                    )
+            else:
+                st.warning(f"⚠️ File not found: {SNAPSHOT_FILE}")
+        elif _export_key_input:
+            st.error("❌ Invalid export key.")
+    # ==================================================================
+    # END TEMPORARY PRODUCTION DATA EXPORT
+    # ==================================================================
+
 CANCELLED_KEYWORDS = ["batal", "cancel"]
 # Only orders whose status CONTAINS this phrase may be packed
 PACKABLE_KEYWORD = "perlu dikirim"
