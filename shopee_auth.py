@@ -380,6 +380,17 @@ def _get_supabase_client():
         return None
 
 
+def get_supabase_client():
+    """Public accessor for the shared, lazily-cached Supabase client (see
+    _get_supabase_client() above). Returns None if Supabase isn't configured
+    (SUPABASE_URL/SUPABASE_KEY unset) or the client couldn't be created —
+    callers must handle a None return by treating Supabase as unavailable,
+    never by raising. Lets other modules (e.g. app.py's packing persistence)
+    reuse the same cached client/credentials instead of duplicating the
+    env-var + create_client() logic."""
+    return _get_supabase_client()
+
+
 def _supabase_load_tokens(shop_id: Optional[int] = None) -> Optional[Dict]:
     """Fetch a token row from Supabase.
 

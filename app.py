@@ -1,9 +1,12 @@
 import streamlit as st
 import pandas as pd
 import os
+import logging
 import streamlit.components.v1 as components
 from datetime import datetime
 from zoneinfo import ZoneInfo
+
+logger = logging.getLogger(__name__)
 
 st.set_page_config(page_title="Shopee Packing Checker", layout="wide")
 st.title("📦 Shopee Packing Checker")
@@ -895,23 +898,97 @@ def load_shopee_orders():
     return _normalize_shop_id_column(df)
 
 
+# ---- Persistent packing history: Supabase is the source of truth ----
+# packed_orders / packed_snapshot_items (existing tables, see
+# migrate_packing_history.py for the schema) hold ALL packing history.
+# packed.csv / packed_snapshots.csv are no longer read or written by the
+# packing flow (existing files are left untouched). A Supabase read or
+# write failure is NEVER treated as "empty history" or as a successful
+# pack: it raises PackingHistoryError, which the UI surfaces explicitly.
+PACKED_ORDERS_TABLE = "packed_orders"
+SNAPSHOT_ITEMS_TABLE = "packed_snapshot_items"
+_SUPABASE_PAGE_SIZE = 1000  # PostgREST returns at most 1000 rows per request
+
+# packed_snapshot_items column -> app (CSV-era) column name
+SNAPSHOT_DB_TO_APP = {
+    "no_pesanan": "No. Pesanan",
+    "username": "Username (Pembeli)",
+    "nama_penerima": "Nama Penerima",
+    "platform": "Platform",
+    "toko": "Toko",
+    "provinsi": "Provinsi",
+    "kota_kabupaten": "Kota/Kabupaten",
+    "shipping": "Antar ke counter/ pick-up",
+    "ekspedisi": "Ekspedisi",
+    "nama_variasi": "Nama Variasi",
+    "jumlah": "Jumlah",
+}
+
+
+class PackingHistoryError(RuntimeError):
+    """Packing history could not be read from / written to Supabase."""
+
+
+def _history_client():
+    client = _shopee_auth.get_supabase_client()
+    if client is None:
+        raise PackingHistoryError(
+            "Supabase tidak terkonfigurasi (SUPABASE_URL / SUPABASE_KEY) "
+            "atau client gagal dibuat."
+        )
+    return client
+
+
+def _fetch_all(table, columns, order_by):
+    """Read every row of `table`, paging past PostgREST's 1000-row cap.
+    Any failure raises PackingHistoryError — never returns partial data."""
+    client = _history_client()
+    rows = []
+    start = 0
+    try:
+        while True:
+            query = client.table(table).select(columns)
+            for col in order_by:
+                query = query.order(col)
+            page = query.range(start, start + _SUPABASE_PAGE_SIZE - 1).execute().data or []
+            rows.extend(page)
+            if len(page) < _SUPABASE_PAGE_SIZE:
+                return rows
+            start += _SUPABASE_PAGE_SIZE
+    except Exception as e:
+        logger.warning("Supabase read failed for %s: %s", table, e)
+        raise PackingHistoryError(f"Gagal membaca {table} dari Supabase: {e}") from e
+
+
+def _timestamptz_to_wib_str(series):
+    """Supabase timestamptz (ISO 8601, usually returned in UTC) -> the app's
+    naive WIB string "%Y-%m-%d %H:%M:%S" (same format the CSV used, so the
+    startswith(today) / to_datetime logic in the reports is unchanged)."""
+    parsed = pd.to_datetime(series, utc=True, format="ISO8601", errors="coerce")
+    return parsed.dt.tz_convert(WIB).dt.strftime("%Y-%m-%d %H:%M:%S").fillna("")
+
+
 @st.cache_data
 def load_packed_df():
-    if os.path.exists(PACKED_FILE):
-        df = pd.read_csv(PACKED_FILE)
-        df["order_number"] = df["order_number"].astype(str).str.strip()
-        if "packed_at" not in df.columns:
-            df["packed_at"] = ""  # old-format file, no timestamp known
-        if "shop_id" not in df.columns:
-            # Legacy rows predate multi-shop support — they were all Onbie's.
-            df["shop_id"] = SHOPEE_ONBIE_SHOP_ID
-        df["shop_id"] = (
-            pd.to_numeric(df["shop_id"], errors="coerce")
-            .fillna(SHOPEE_ONBIE_SHOP_ID)
-            .astype("int64")
-        )
-        return df
-    return pd.DataFrame(columns=["order_number", "packed_at", "shop_id"])
+    """packed_orders -> DataFrame[order_number, packed_at, shop_id]. Cached;
+    invalidated after every successful write. Raises PackingHistoryError on
+    a read failure (exceptions are not cached by st.cache_data)."""
+    rows = _fetch_all(
+        PACKED_ORDERS_TABLE, "shop_id,order_number,packed_at",
+        ["packed_at", "shop_id", "order_number"],
+    )
+    if not rows:
+        return pd.DataFrame({
+            "order_number": pd.Series(dtype="object"),
+            "packed_at": pd.Series(dtype="object"),
+            "shop_id": pd.Series(dtype="int64"),
+        })
+    raw = pd.DataFrame(rows)
+    return pd.DataFrame({
+        "order_number": raw["order_number"].astype(str).str.strip(),
+        "packed_at": _timestamptz_to_wib_str(raw["packed_at"]),
+        "shop_id": pd.to_numeric(raw["shop_id"]).astype("int64"),
+    })
 
 
 def load_packed_orders():
@@ -936,76 +1013,137 @@ def get_packed_at(shop_id, order_number):
 
 @st.cache_data
 def load_snapshots_df():
-    if os.path.exists(SNAPSHOT_FILE):
-        df = pd.read_csv(SNAPSHOT_FILE)
-        df["order_number"] = df["order_number"].astype(str).str.strip()
-        if "shop_id" not in df.columns:
-            # Legacy rows predate multi-shop support — they were all Onbie's.
-            df["shop_id"] = SHOPEE_ONBIE_SHOP_ID
-        df["shop_id"] = (
-            pd.to_numeric(df["shop_id"], errors="coerce")
-            .fillna(SHOPEE_ONBIE_SHOP_ID)
-            .astype("int64")
-        )
-        return df
-    return pd.DataFrame(columns=SNAPSHOT_COLUMNS)
-
-
-def save_packed_snapshot(shop_id, order_number, order_rows, packed_at):
-    """Save a permanent snapshot of this order's product rows at pack time,
-    so the Daily Packing Report keeps working even after orders_df has since
-    moved on (a later Shopee sync, etc.). One row is saved per
-    product row so multi-item orders are preserved. Never deletes old
-    snapshots (no retention/pruning) and never duplicates an order that
-    already has a snapshot. Keyed by (shop_id, order_number) — order_number
-    alone can repeat across shops."""
-    if order_rows is None or order_rows.empty:
-        return
-    shop_id = int(shop_id)
-    order_number = str(order_number).strip()
-    existing = load_snapshots_df()
-    already_snapshotted = (
-        (existing["shop_id"] == shop_id) & (existing["order_number"] == order_number)
-    ).any()
-    if already_snapshotted:
-        return  # already snapshotted, don't duplicate
-    new_rows = pd.DataFrame({
-        "order_number": order_number,
-        "shop_id": shop_id,
-        "packed_at": packed_at,
-        "No. Pesanan": order_rows.get("No. Pesanan", "-"),
-        "Username (Pembeli)": order_rows.get("Username (Pembeli)", "-"),
-        "Nama Penerima": order_rows.get("Nama Penerima", "-"),
-        "Platform": order_rows.get("Platform", "-"),
-        "Toko": order_rows.get("Toko", "-"),
-        "Provinsi": order_rows.get("Provinsi", "-"),
-        "Kota/Kabupaten": order_rows.get("Kota/Kabupaten", "-"),
-        "Antar ke counter/ pick-up": order_rows.get("Antar ke counter/ pick-up", "-"),
-        "Ekspedisi": order_rows.get("Ekspedisi", "-"),
-        "Nama Variasi": order_rows.get("Nama Variasi", "-"),
-        "Jumlah": order_rows.get("Jumlah", 0),
+    """packed_snapshot_items -> DataFrame[SNAPSHOT_COLUMNS], one row per
+    product row, ordered by pack time then row_index. Cached; invalidated
+    after every successful write. Raises PackingHistoryError on a read
+    failure."""
+    rows = _fetch_all(
+        SNAPSHOT_ITEMS_TABLE,
+        "shop_id,order_number,packed_at,row_index," + ",".join(SNAPSHOT_DB_TO_APP),
+        ["packed_at", "shop_id", "order_number", "row_index"],
+    )
+    if not rows:
+        return pd.DataFrame(columns=SNAPSHOT_COLUMNS)
+    raw = pd.DataFrame(rows)
+    out = pd.DataFrame({
+        "order_number": raw["order_number"].astype(str).str.strip(),
+        "shop_id": pd.to_numeric(raw["shop_id"]).astype("int64"),
+        "packed_at": _timestamptz_to_wib_str(raw["packed_at"]),
     })
-    combined = pd.concat([existing, new_rows], ignore_index=True)
-    combined.to_csv(SNAPSHOT_FILE, index=False)
-    load_snapshots_df.clear()  # invalidate cache: file just changed on disk
+    for db_col, app_col in SNAPSHOT_DB_TO_APP.items():
+        if app_col == "Jumlah":
+            out[app_col] = pd.to_numeric(raw[db_col], errors="coerce").fillna(0).astype("int64")
+        else:
+            out[app_col] = raw[db_col].fillna("-").astype(str)
+    return out[SNAPSHOT_COLUMNS]
+
+
+def _read_identity(client, table, columns, shop_id, order_number):
+    return (
+        client.table(table).select(columns)
+        .eq("shop_id", shop_id).eq("order_number", order_number)
+        .execute().data
+    ) or []
+
+
+def _build_snapshot_items(shop_id, order_number, packed_at_iso, order_rows):
+    """One packed_snapshot_items row per product row; row_index is the
+    0-based position within the order (matches the unique constraint
+    (shop_id, order_number, row_index))."""
+    items = []
+    for row_index, (_, r) in enumerate(order_rows.iterrows()):
+        jumlah = r.get("Jumlah", 0)
+        try:
+            jumlah = int(jumlah) if pd.notna(jumlah) else 0
+        except (ValueError, TypeError):
+            jumlah = 0
+        item = {
+            "shop_id": shop_id,
+            "order_number": order_number,
+            "packed_at": packed_at_iso,
+            "row_index": row_index,
+        }
+        for db_col, app_col in SNAPSHOT_DB_TO_APP.items():
+            item[db_col] = jumlah if db_col == "jumlah" else str(r.get(app_col, "-"))
+        items.append(item)
+    return items
+
+
+def persist_packed_order(shop_id, order_number, order_rows, now_dt):
+    """Persist one pack event to Supabase and VERIFY it. Raises
+    PackingHistoryError on any failure; returns the effective packed_at
+    (ISO string) on success.
+
+    Safe to retry any number of times:
+      * snapshot items are written FIRST, packed_orders LAST — packed_orders
+        is what marks an order as packed, so a failure in between leaves the
+        order unpacked (retry-able), never "packed without snapshot";
+      * both writes use ON CONFLICT DO NOTHING (ignore_duplicates), so an
+        existing packed_at is never overwritten and snapshot rows are never
+        duplicated, even if this session's cache is stale;
+      * if an earlier attempt left snapshot rows behind, their packed_at is
+        reused so packed_orders and its snapshot always agree.
+    Identity is always (shop_id, order_number)."""
+    client = _history_client()
+    try:
+        packed_rows = _read_identity(client, PACKED_ORDERS_TABLE, "packed_at", shop_id, order_number)
+        snap_rows = _read_identity(client, SNAPSHOT_ITEMS_TABLE, "packed_at,row_index", shop_id, order_number)
+        effective_at = (
+            (packed_rows[0]["packed_at"] if packed_rows else None)
+            or (snap_rows[0]["packed_at"] if snap_rows else None)
+            or now_dt.isoformat()
+        )
+
+        items = []
+        if order_rows is not None and not order_rows.empty and not snap_rows:
+            items = _build_snapshot_items(shop_id, order_number, effective_at, order_rows)
+        if items:
+            client.table(SNAPSHOT_ITEMS_TABLE).upsert(
+                items, on_conflict="shop_id,order_number,row_index", ignore_duplicates=True
+            ).execute()
+        if not packed_rows:
+            client.table(PACKED_ORDERS_TABLE).upsert(
+                {"shop_id": shop_id, "order_number": order_number, "packed_at": effective_at},
+                on_conflict="shop_id,order_number", ignore_duplicates=True,
+            ).execute()
+
+        # Read back: never report success on an unverified write.
+        if not _read_identity(client, PACKED_ORDERS_TABLE, "packed_at", shop_id, order_number):
+            raise PackingHistoryError("packed_orders tidak ditemukan setelah penulisan.")
+        if items:
+            have = {r["row_index"] for r in _read_identity(
+                client, SNAPSHOT_ITEMS_TABLE, "row_index", shop_id, order_number)}
+            if not set(range(len(items))) <= have:
+                raise PackingHistoryError("packed_snapshot_items tidak lengkap setelah penulisan.")
+        return effective_at
+    except PackingHistoryError:
+        raise
+    except Exception as e:
+        logger.warning(
+            "Supabase pack persist failed for shop_id=%s order_number=%s: %s",
+            shop_id, order_number, e,
+        )
+        raise PackingHistoryError(f"Gagal menyimpan ke Supabase: {e}") from e
 
 
 def save_packed_order(shop_id, order_number, order_rows=None):
-    df = load_packed_df()
+    """Persist a pack to Supabase. Returns True only when the write was
+    verified; on failure shows a clear error and returns False — callers
+    must NOT show a "packed" state in that case. Safe to retry."""
     shop_id = int(shop_id)
     order_number = str(order_number).strip()
-    packed_at = _now_wib().strftime("%Y-%m-%d %H:%M:%S")
-    already_packed = ((df["shop_id"] == shop_id) & (df["order_number"] == order_number)).any()
-    if not already_packed:
-        new_row = pd.DataFrame([{
-            "order_number": order_number,
-            "packed_at": packed_at,
-            "shop_id": shop_id,
-        }])
-        df = pd.concat([df, new_row], ignore_index=True)
-    df.to_csv(PACKED_FILE, index=False)
-    load_packed_df.clear()  # invalidate cache: file just changed on disk
-    save_packed_snapshot(shop_id, order_number, order_rows, packed_at)
+    try:
+        persist_packed_order(shop_id, order_number, order_rows, _now_wib())
+    except PackingHistoryError as e:
+        st.error(
+            f"❌ GAGAL MENYIMPAN PACKING order {order_number} — BELUM tercatat "
+            "di Supabase. Tekan lagi untuk mencoba ulang (aman, tidak akan "
+            f"membuat duplikat). Detail: {e}"
+        )
+        return False
+    load_packed_df.clear()  # invalidate caches: Supabase just changed
+    load_snapshots_df.clear()
+    return True
 
 
 def style_dashboard_table(df, wrap_columns=None):
@@ -1113,6 +1251,20 @@ if "ambiguous_shops" not in st.session_state:
     # List of Toko labels when a scanned query matches the same order number
     # under more than one shop — set only in that case, otherwise None.
     st.session_state.ambiguous_shops = None
+# Packing history lives in Supabase. If it can't be read, do NOT render the
+# packing UI/reports as if history were empty — stop with a clear error.
+# (st.cache_data does not cache exceptions, so every rerun retries.)
+try:
+    load_packed_df()
+    load_snapshots_df()
+except PackingHistoryError as _history_err:
+    st.error(
+        "❌ Riwayat packing tidak dapat dibaca dari Supabase, jadi packing & "
+        "laporan dihentikan (riwayat TIDAK ditampilkan sebagai kosong). "
+        f"Detail: {_history_err}"
+    )
+    st.button("🔄 Coba lagi", key="btn_retry_history")
+    st.stop()
 
 
 # Use Shopee-synced DataFrame when available (fast path, same session).
@@ -1212,9 +1364,9 @@ else:
                         packable = is_packable_status(status)
                         already_packed = (shop_id, order_number) in packed_orders
                         if packable and not already_packed:
-                            save_packed_order(shop_id, order_number, results)
-                            st.session_state.just_packed_order = (shop_id, order_number)
-                            st.rerun()  # full-app rerun: dashboard below must reflect the new pack
+                            if save_packed_order(shop_id, order_number, results):
+                                st.session_state.just_packed_order = (shop_id, order_number)
+                                st.rerun()  # full-app rerun: dashboard below must reflect the new pack
 
         # ---- Order not found banner ----
         if st.session_state.not_found_query:
@@ -1343,9 +1495,9 @@ else:
                         st.button("✅ Sudah Di-Pack", disabled=True, key="btn_already_packed")
                     else:
                         if st.button("📌 Mark as Packed", key="btn_manual_pack", use_container_width=True):
-                            save_packed_order(shop_id, order_number, results)
-                            st.session_state.just_packed_order = (shop_id, order_number)
-                            st.rerun()
+                            if save_packed_order(shop_id, order_number, results):
+                                st.session_state.just_packed_order = (shop_id, order_number)
+                                st.rerun()
 
                     with st.expander("📋 Detail Order"):
                         d1, d2 = st.columns(2)
