@@ -940,7 +940,11 @@ def _history_client():
 
 
 def _fetch_all(table, columns, order_by):
-    """Read every row of `table`, paging past PostgREST's 1000-row cap.
+    """Read every row of `table`, paging past PostgREST's row cap.
+    Advances by the number of rows actually returned and stops ONLY on an
+    empty page, so a server-side max-rows below _SUPABASE_PAGE_SIZE (or a
+    client library with a different range() end semantics) can never cause
+    silent truncation. Costs one extra (empty) request per read.
     Any failure raises PackingHistoryError — never returns partial data."""
     client = _history_client()
     rows = []
@@ -951,10 +955,10 @@ def _fetch_all(table, columns, order_by):
             for col in order_by:
                 query = query.order(col)
             page = query.range(start, start + _SUPABASE_PAGE_SIZE - 1).execute().data or []
-            rows.extend(page)
-            if len(page) < _SUPABASE_PAGE_SIZE:
+            if not page:
                 return rows
-            start += _SUPABASE_PAGE_SIZE
+            rows.extend(page)
+            start += len(page)
     except Exception as e:
         logger.warning("Supabase read failed for %s: %s", table, e)
         raise PackingHistoryError(f"Gagal membaca {table} dari Supabase: {e}") from e
