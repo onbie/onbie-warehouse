@@ -23,6 +23,9 @@ What this page never does:
       or Supabase.
     - Sync orders (not implemented yet).
 
+Access: OWNER login required (auth_guard.gate). PACKER and anonymous
+visitors never reach the token exchange.
+
 The seller authorization link is NOT constructed here. It is the exact URL
 from Partner Center's "Copy authorization link", supplied via the optional
 Streamlit secret TIKTOK_AUTH_URL.
@@ -40,6 +43,7 @@ if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
 import tiktok_auth  # noqa: E402
+import auth_guard  # noqa: E402
 
 RESULT_KEY = "_tiktok_oauth_result"
 
@@ -62,6 +66,14 @@ def _bridge_secrets():
 
 
 _bridge_secrets()
+
+# ---- Login gate: OWNER only ---------------------------------------------
+# This page is a separate Streamlit script, so app.py's gate does NOT cover
+# it. TikTok's redirect opens a fresh session: the visitor logs in here and
+# the one-time `code` stays in the URL until the OWNER is through the gate
+# (it is cleared on a denied visit, and below as soon as it is consumed).
+auth_guard.bridge_secrets()
+auth_guard.gate(roles=(auth_guard.ROLE_OWNER,))
 
 # ---- Handle the OAuth redirect ----------------------------------------
 # The auth code is single-use and secret. Take it, remove it from the URL

@@ -89,6 +89,18 @@ def _inject_supabase_secrets():
 
 _inject_supabase_secrets()
 
+# ---- Login gate (Supabase Auth; roles OWNER / PACKER) ----
+# Everything below - Shopee token bootstrap/OAuth, sidebar, packing UI,
+# reports - only runs for a logged-in, active user. Unauthenticated visitors
+# get the login form (or a configuration error: the gate fails closed) and
+# the script stops here. @st.fragment bodies re-check the session
+# themselves (auth_guard.fragment_guard) because a fragment rerun does not
+# re-run this top-level gate.
+import auth_guard
+import account_admin
+auth_guard.bridge_secrets()
+_auth_user = auth_guard.gate()
+
 # ---- Legacy fallback: bootstrap from Streamlit secrets if Supabase is down ----
 # Supabase (see shopee_auth.py) is now the primary persistence layer and
 # handles this automatically: load_tokens() checks Supabase first, and every
@@ -131,6 +143,16 @@ def _handle_shopee_oauth():
     params = st.query_params
     code = params.get("code", "")
     shop_id_str = params.get("shop_id", "")
+
+    if code or shop_id_str:
+        # Saving Shopee tokens is an OWNER-only action. Drop the one-time
+        # code from the URL either way so it can't be replayed.
+        try:
+            auth_guard.require_role(auth_guard.ROLE_OWNER)
+        except auth_guard.AuthError as _auth_e:
+            st.query_params.clear()
+            st.error(f"❌ Koneksi Shopee ditolak: {_auth_e} Hanya OWNER yang boleh menghubungkan Shopee.")
+            return
 
     if code and not shop_id_str:
         # Shopee returned a code but no shop_id (typically a merchant / main-account
@@ -518,6 +540,13 @@ def _sync_one_shop(label, shop_id):
     import shopee_api as _shopee_api_sync
     import time as _time_sync
 
+    # Any logged-in role may sync (auto-sync runs in a fragment, which skips
+    # the page-level gate). Background syncs do not count as user activity.
+    try:
+        auth_guard.require_role(touch=False)
+    except auth_guard.AuthError as _auth_e:
+        return False, f"❌ {_auth_e}"
+
     _status = _get_shop_sync_status(shop_id)
     _status["last_attempt_ts"] = _time_sync.time()
 
@@ -629,6 +658,7 @@ def _shopee_auto_sync_fragment():
     the app — this is what makes syncing "automatic" without a separate
     worker/service or hand-rolled JS polling. Renders nothing; it only
     performs the (rate-limited) sync check above."""
+    auth_guard.fragment_guard(touch=False)  # a fragment rerun skips the page gate
     _maybe_auto_sync_shopee_orders()
 
 
@@ -638,6 +668,9 @@ def _shopee_auto_sync_fragment():
 # One block per shop in SHOPEE_SHOPS (Onbie only for now); with a single shop
 # the layout is the same as the original single-shop sidebar.
 with st.sidebar:
+    auth_guard.render_user_box()
+    _is_owner = auth_guard.is_owner()  # UI hiding only; privileged functions re-check
+
     st.header("🟠 Shopee Integration")
 
     # Registers the run_every fragment so the 5-minute auto-sync timer
@@ -675,14 +708,15 @@ with st.sidebar:
                 if _shopee_auth.is_token_expired(_tokens):
                     st.warning("⚠️ Token sudah expired atau hampir expired. Klik Reconnect.")
 
-            with st.expander("Token Details"):
-                st.json({
-                    "access_token":  _shopee_auth.mask_token(_tokens.get("access_token", "")),
-                    "refresh_token": _shopee_auth.mask_token(_tokens.get("refresh_token", "")),
-                    "expire_in":     _tokens.get("expire_in"),
-                    "fetch_time":    _tokens.get("fetch_time"),
-                    "shop_id":       _tokens.get("shop_id"),
-                })
+            if _is_owner:
+                with st.expander("Token Details"):
+                    st.json({
+                        "access_token":  _shopee_auth.mask_token(_tokens.get("access_token", "")),
+                        "refresh_token": _shopee_auth.mask_token(_tokens.get("refresh_token", "")),
+                        "expire_in":     _tokens.get("expire_in"),
+                        "fetch_time":    _tokens.get("fetch_time"),
+                        "shop_id":       _tokens.get("shop_id"),
+                    })
 
             # Shopee rotates refresh_token on each refresh. The stored tokens
             # (Supabase, or tokens.json when Supabase isn't configured) always
@@ -692,7 +726,7 @@ with st.sidebar:
             # container restart would bootstrap from the now-stale secret value
             # and fail, silently landing back on "Belum terhubung ke Shopee".
             # The [shopee_tokens] secret is Onbie's only.
-            if _shop_id == SHOPEE_ONBIE_SHOP_ID:
+            if _shop_id == SHOPEE_ONBIE_SHOP_ID and _is_owner:
                 try:
                     _secret_refresh_token = st.secrets["shopee_tokens"]["refresh_token"]
                     if _secret_refresh_token and _secret_refresh_token != _tokens.get("refresh_token"):
@@ -704,7 +738,7 @@ with st.sidebar:
                 except KeyError:
                     pass  # no [shopee_tokens] secret configured — nothing to compare
 
-            if st.button(f"🔄 Reconnect {_what}", key=f"btn_reconnect_shopee_{_shop_id}"):
+            if _is_owner and st.button(f"🔄 Reconnect {_what}", key=f"btn_reconnect_shopee_{_shop_id}"):
                 try:
                     # Redirect URL must match exactly what is registered in Shopee Open Platform.
                     _redirect_url = "https://onbie-packing.streamlit.app"
@@ -716,7 +750,7 @@ with st.sidebar:
         else:
             st.warning("Belum terhubung ke Shopee")
 
-            if st.button(f"🟠 Connect {_what}", key=f"btn_connect_shopee_{_shop_id}"):
+            if _is_owner and st.button(f"🟠 Connect {_what}", key=f"btn_connect_shopee_{_shop_id}"):
                 try:
                     # Redirect URL must match exactly what is registered in Shopee Open Platform.
                     _redirect_url = "https://onbie-packing.streamlit.app"
@@ -725,10 +759,13 @@ with st.sidebar:
                 except ValueError as e:
                     st.error(f"❌ {e}")
 
-            st.caption(
-                "Klik tombol di atas untuk mengizinkan Onbie Packing System "
-                "mengakses data order Shopee kamu."
-            )
+            if _is_owner:
+                st.caption(
+                    "Klik tombol di atas untuk mengizinkan Onbie Packing System "
+                    "mengakses data order Shopee kamu."
+                )
+            else:
+                st.caption("Hubungi OWNER untuk menghubungkan Shopee.")
 
         if _multi_shop:
             st.divider()
@@ -787,44 +824,50 @@ with st.sidebar:
     # of packed.csv and packed_snapshots.csv only, read from their current
     # runtime paths. No other logic in this file is touched.
     # ==================================================================
-    with st.expander("🔒 Temporary Production Data Export"):
-        _export_key_input = st.text_input(
-            "Export key", type="password", key="_export_key_input"
-        )
-        try:
-            _export_key_expected = st.secrets["export_key"]
-        except (KeyError, FileNotFoundError):
-            _export_key_expected = None
+    if _is_owner:
+        with st.expander("🔒 Temporary Production Data Export"):
+            _export_key_input = st.text_input(
+                "Export key", type="password", key="_export_key_input"
+            )
+            try:
+                _export_key_expected = st.secrets["export_key"]
+            except (KeyError, FileNotFoundError):
+                _export_key_expected = None
 
-        if _export_key_expected and _export_key_input == _export_key_expected:
-            if os.path.exists(PACKED_FILE):
-                with open(PACKED_FILE, "rb") as _f:
-                    st.download_button(
-                        "⬇️ Download packed.csv (raw)",
-                        _f.read(),
-                        file_name="packed.csv",
-                        mime="text/csv",
-                        key="_export_packed_csv",
-                    )
-            else:
-                st.warning(f"⚠️ File not found: {PACKED_FILE}")
+            if _export_key_expected and _export_key_input == _export_key_expected:
+                if os.path.exists(PACKED_FILE):
+                    with open(PACKED_FILE, "rb") as _f:
+                        st.download_button(
+                            "⬇️ Download packed.csv (raw)",
+                            _f.read(),
+                            file_name="packed.csv",
+                            mime="text/csv",
+                            key="_export_packed_csv",
+                        )
+                else:
+                    st.warning(f"⚠️ File not found: {PACKED_FILE}")
 
-            if os.path.exists(SNAPSHOT_FILE):
-                with open(SNAPSHOT_FILE, "rb") as _f:
-                    st.download_button(
-                        "⬇️ Download packed_snapshots.csv (raw)",
-                        _f.read(),
-                        file_name="packed_snapshots.csv",
-                        mime="text/csv",
-                        key="_export_snapshots_csv",
-                    )
-            else:
-                st.warning(f"⚠️ File not found: {SNAPSHOT_FILE}")
-        elif _export_key_input:
-            st.error("❌ Invalid export key.")
+                if os.path.exists(SNAPSHOT_FILE):
+                    with open(SNAPSHOT_FILE, "rb") as _f:
+                        st.download_button(
+                            "⬇️ Download packed_snapshots.csv (raw)",
+                            _f.read(),
+                            file_name="packed_snapshots.csv",
+                            mime="text/csv",
+                            key="_export_snapshots_csv",
+                        )
+                else:
+                    st.warning(f"⚠️ File not found: {SNAPSHOT_FILE}")
+            elif _export_key_input:
+                st.error("❌ Invalid export key.")
     # ==================================================================
     # END TEMPORARY PRODUCTION DATA EXPORT
     # ==================================================================
+
+    # OWNER-only: manage PACKER accounts (every action re-checks OWNER server-side).
+    if _is_owner:
+        with st.expander("👥 Kelola Akun PACKER"):
+            account_admin.render_owner_panel()
 
 CANCELLED_KEYWORDS = ["batal", "cancel"]
 # Only orders whose status CONTAINS this phrase may be packed
@@ -1090,6 +1133,7 @@ def persist_packed_order(shop_id, order_number, order_rows, now_dt):
       * if an earlier attempt left snapshot rows behind, their packed_at is
         reused so packed_orders and its snapshot always agree.
     Identity is always (shop_id, order_number)."""
+    auth_guard.require_role(auth_guard.ROLE_OWNER, auth_guard.ROLE_PACKER)
     client = _history_client()
     try:
         packed_rows = _read_identity(client, PACKED_ORDERS_TABLE, "packed_at", shop_id, order_number)
@@ -1139,7 +1183,15 @@ def save_packed_order(shop_id, order_number, order_rows=None):
     shop_id = int(shop_id)
     order_number = str(order_number).strip()
     try:
+        auth_guard.require_role(auth_guard.ROLE_OWNER, auth_guard.ROLE_PACKER)
+    except auth_guard.AuthError as e:
+        st.error(f"❌ PACKING DITOLAK — {e}")
+        return False
+    try:
         persist_packed_order(shop_id, order_number, order_rows, _now_wib())
+    except auth_guard.AuthError as e:
+        st.error(f"❌ PACKING DITOLAK — {e}")
+        return False
     except PackingHistoryError as e:
         st.error(
             f"❌ GAGAL MENYIMPAN PACKING order {order_number} — BELUM tercatat "
@@ -1302,6 +1354,7 @@ else:
     # Anything that changes packed.csv must call st.rerun() (app scope) so the dashboard refreshes.
     @st.fragment
     def scan_and_order_section():
+        auth_guard.fragment_guard(touch=True)  # a fragment rerun skips the page gate
         # Re-resolve orders_df here: a fragment-only rerun does not re-execute the module-level lookup
         # above, and the 5-min auto-sync fragment may have replaced st.session_state["shopee_orders_df"]
         # since the last full run. Same resolution order as the module-level lookup.
