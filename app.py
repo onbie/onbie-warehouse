@@ -2,6 +2,8 @@ import streamlit as st
 import pandas as pd
 import os
 import logging
+import html as _html
+import json
 import streamlit.components.v1 as components
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -845,11 +847,11 @@ def big_banner(lines, bg_color):
     for i, line in enumerate(lines):
         if i == 0:
             parts.append(
-                f'<div style="font-size: 38px; font-weight: 900; letter-spacing: 2px;">{line}</div>'
+                f'<div style="font-size: 38px; font-weight: 900; letter-spacing: 2px;">{_esc(line)}</div>'
             )
         else:
             parts.append(
-                f'<div style="font-size: 18px; font-weight: 600; margin-top: 8px;">{line}</div>'
+                f'<div style="font-size: 18px; font-weight: 600; margin-top: 8px;">{_esc(line)}</div>'
             )
     st.markdown(
         f"""
@@ -1197,6 +1199,21 @@ def _safe_cell(val):
     return s if s and s.lower() != "nan" else "-"
 
 
+def _esc(val):
+    """HTML-escape a data-driven value before interpolating it into
+    markup (st.markdown unsafe_allow_html / print HTML). Order data contains
+    buyer-controlled strings. NaN/blank -> '-' via _safe_cell. Not used for
+    st.dataframe cells (those are not HTML)."""
+    return _html.escape(_safe_cell(val), quote=True)
+
+
+def _js_string(text):
+    """Embed text as a JS string literal inside an inline <script>: JSON
+    encoding handles quotes, backticks, backslashes and newlines; '</' is
+    neutralised so the text can't close the script element."""
+    return json.dumps(text).replace("</", "<\\/")
+
+
 def build_rowspan_rows_html(df, group_col, merge_cols, other_cols, blank_cols=None, right_align_cols=None):
     """Return concatenated <tr>...</tr> HTML for df, grouped by group_col:
     merge_cols get rowspan="{n}" on only the first row of each group;
@@ -1216,10 +1233,10 @@ def build_rowspan_rows_html(df, group_col, merge_cols, other_cols, blank_cols=No
             cells = []
             if i == 0:
                 for col in merge_cols:
-                    cells.append(f'<td rowspan="{n}">{_safe_cell(r.get(col))}</td>')
+                    cells.append(f'<td rowspan="{n}">{_esc(r.get(col))}</td>')
             for col in other_cols:
                 cls = ' class="rowspan-qty-cell"' if col in right_align_cols else ""
-                cells.append(f"<td{cls}>{_safe_cell(r.get(col))}</td>")
+                cells.append(f"<td{cls}>{_esc(r.get(col))}</td>")
             for _ in blank_cols:
                 cells.append("<td></td>")
             rows.append("<tr>" + "".join(cells) + "</tr>")
@@ -1439,7 +1456,7 @@ else:
                         border-radius: 999px;
                         margin-bottom: 12px;
                     ">
-                        🏬 {_order_shop}
+                        🏬 {_esc(_order_shop)}
                     </div>
                     """,
                     unsafe_allow_html=True,
@@ -1457,7 +1474,7 @@ else:
                             sku_induk = product.get('SKU Induk', '-')
                             sku_induk_html = f"""
                                     <div style="font-size: 13px; color: #888; margin-top: 4px;">
-                                        SKU: {sku_induk}
+                                        SKU: {_esc(sku_induk)}
                                     </div>"""
 
                         st.markdown(
@@ -1474,10 +1491,10 @@ else:
                             ">
                                 <div style="flex: 1; min-width: 0; padding-right: 16px;">
                                     <div style="font-size: 22px; font-weight: 700; color: #1a1a1a; line-height: 1.3;">
-                                        {nama_produk}
+                                        {_esc(nama_produk)}
                                     </div>
                                     <div style="font-size: 16px; color: #555; margin-top: 6px;">
-                                        Variasi: <b>{nama_variasi}</b>
+                                        Variasi: <b>{_esc(nama_variasi)}</b>
                                     </div>{sku_induk_html}
                                 </div>
                                 <div style="text-align: center; min-width: 110px;">
@@ -1522,15 +1539,15 @@ else:
                     product_rows_html = "".join(
                         f"""
                         <tr>
-                            <td>{row.get('No. Pesanan', '-')}</td>
-                            <td>{row.get('Username (Pembeli)', '-')}</td>
-                            <td>{row.get('Nama Penerima', '-')}</td>
-                            <td>{row.get('Platform', '-')}</td>
-                            <td>{row.get('Toko', '-')}</td>
-                            <td>{row.get('Kota/Kabupaten', '-')}</td>
-                            <td>{row.get('Antar ke counter/ pick-up', '-')}</td>
-                            <td>{row.get('Ekspedisi', '-')}</td>
-                            <td>{p.get('Nama Variasi', '-')}</td>
+                            <td>{_esc(row.get('No. Pesanan', '-'))}</td>
+                            <td>{_esc(row.get('Username (Pembeli)', '-'))}</td>
+                            <td>{_esc(row.get('Nama Penerima', '-'))}</td>
+                            <td>{_esc(row.get('Platform', '-'))}</td>
+                            <td>{_esc(row.get('Toko', '-'))}</td>
+                            <td>{_esc(row.get('Kota/Kabupaten', '-'))}</td>
+                            <td>{_esc(row.get('Antar ke counter/ pick-up', '-'))}</td>
+                            <td>{_esc(row.get('Ekspedisi', '-'))}</td>
+                            <td>{_esc(p.get('Nama Variasi', '-'))}</td>
                             <td>{int(p.get('Jumlah', 0)) if pd.notna(p.get('Jumlah')) else 0}</td>
                         </tr>
                         """
@@ -1540,7 +1557,7 @@ else:
                     printable_html = f"""
                     <html>
                     <head>
-                    <title>Order {order_number}</title>
+                    <title>Order {_esc(order_number)}</title>
                     <style>
                         body {{ font-family: Arial, sans-serif; padding: 24px; }}
                         h1 {{ font-size: 20px; }}
@@ -1562,12 +1579,12 @@ else:
 
                     print_trigger = st.button("🖨️ Print Order Ini")
                     if print_trigger:
-                        escaped = printable_html.replace("`", "\\`")
+                        escaped = _js_string(printable_html)
                         components.html(
                             f"""
                             <script>
                             const w = window.open('', '_blank');
-                            w.document.write(`{escaped}`);
+                            w.document.write({escaped});
                             w.document.close();
                             </script>
                             """,
@@ -1813,12 +1830,12 @@ else:
         """
 
         if st.button("🖨️ Print Laporan Hari Ini"):
-            escaped_report = daily_report_html.replace("`", "\\`")
+            escaped_report = _js_string(daily_report_html)
             components.html(
                 f"""
                 <script>
                 const w = window.open('', '_blank');
-                w.document.write(`{escaped_report}`);
+                w.document.write({escaped_report});
                 w.document.close();
                 </script>
                 """,
